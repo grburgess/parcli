@@ -95,6 +95,8 @@ impl Scheduler {
         }
     }
 
+    /// Test-only accessor; production code never inspects a scheduled time directly.
+    #[cfg(test)]
     pub fn next_poll(&self, number: &str) -> Option<DateTime<Utc>> {
         self.entries.get(number).map(|e| e.next_poll)
     }
