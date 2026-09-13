@@ -46,7 +46,7 @@ route is the MVP provider.
 
 ```
 src/
-  main.rs        clap args, toolchain of setup, runs tui::run
+  main.rs        clap args, browser discovery, wiring, runs tui::run
   app.rs         App state + pure event handlers (Mode enum, selection, table rows)
   store.rs       ParcelList TOML load/save; StateCache JSON load/save
   provider/
@@ -92,7 +92,7 @@ trait Provider { async fn track(&self, number: &str) -> anyhow::Result<Tracking>
 
 `ParcelsAppProvider`:
 1. Launch one headless browser at startup (`chromiumoxide::Browser::launch`,
-   `BrowserConfig` with the discovered executable, headless, no sandbox off).
+   `BrowserConfig` with the discovered executable, headless).
 2. `track(number)`: open a new page at `https://parcelsapp.com/widget`, subscribe
    to `Network.responseReceived` events, set `#track-input` value, click
    `#track-button`, await the first response whose URL contains `api/v2/parcels`,
@@ -136,8 +136,7 @@ at a time.
 
 Adding accepts an optional label after a space: `RB123456789CN camera`.
 
-All handlers are pure functions on `App` returning `Vec<Effect>` (`SavePar-
-cels`, `SendPoll(cmd)`, `Quit`) so they can be unit-tested without a terminal.
+All handlers are pure functions on `App` returning `Vec<Effect>` (`SaveParcels`, `SendPoll(cmd)`, `Quit`) so they can be unit-tested without a terminal.
 
 ## UI
 
