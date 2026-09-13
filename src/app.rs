@@ -102,6 +102,9 @@ impl App {
                         let Some(number) = self.selected_parcel().map(|p| p.number.clone()) else { return vec![] };
                         self.parcels.remove(&number);
                         self.cache.by_number.remove(&number);
+                        if self.polling.as_deref() == Some(number.as_str()) {
+                            self.polling = None;
+                        }
                         self.clamp_selection();
                         vec![Effect::SaveParcels, Effect::SaveState, Effect::Send(PollCommand::Remove(number))]
                     }
@@ -314,6 +317,22 @@ mod tests {
         assert_eq!(app.parcels.parcels.len(), 1);
         assert_eq!(app.selected, 0);
         assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn remove_clears_polling_for_that_parcel() {
+        let mut app = app_with(&["A"]);
+        app.polling = Some("A".into());
+        app.handle_key(key('d'), now());
+        app.handle_key(key('y'), now());
+        assert!(app.polling.is_none());
+
+        let mut app = app_with(&["A", "B"]);
+        app.polling = Some("A".into());
+        app.handle_key(key('j'), now());
+        app.handle_key(key('d'), now());
+        app.handle_key(key('y'), now());
+        assert_eq!(app.polling.as_deref(), Some("A"));
     }
 
     #[test]
