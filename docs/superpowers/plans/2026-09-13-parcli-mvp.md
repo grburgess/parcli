@@ -1942,12 +1942,12 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc>, spin
             status.label().to_string()
         };
         Row::new(vec![
-            Cell::from(p.label.clone().unwrap_or_else(|_| chrono::Duration::zero())),
+            Cell::from(p.label.clone().unwrap_or_default()),
             Cell::from(p.number.clone()),
-            Cell::from(tracking.and_then(|t| t.carrier.clone()).unwrap_or_else(|_| chrono::Duration::zero())),
+            Cell::from(tracking.and_then(|t| t.carrier.clone()).unwrap_or_default()),
             Cell::from(status_text).style(Style::default().fg(status_color(status)).add_modifier(Modifier::BOLD)),
-            Cell::from(latest.map(|e| e.description.clone()).unwrap_or_else(|_| chrono::Duration::zero())),
-            Cell::from(latest.and_then(|e| e.time).map(|t| humanize(now - t)).unwrap_or_else(|_| chrono::Duration::zero())),
+            Cell::from(latest.map(|e| e.description.clone()).unwrap_or_default()),
+            Cell::from(latest.and_then(|e| e.time).map(|t| humanize(now - t)).unwrap_or_default()),
             Cell::from(next),
         ])
     });
