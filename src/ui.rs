@@ -137,7 +137,7 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App, scroll: u16) {
         Some(t) => t
             .events
             .iter()
-            .skip(scroll as usize)
+            .skip((scroll as usize).min(t.events.len().saturating_sub(1)))
             .map(|e| {
                 let when = e.time.map(|d| d.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_else(|| "—".repeat(8));
                 let loc = e.location.clone().unwrap_or_default();
@@ -275,6 +275,14 @@ mod tests {
         assert!(out.contains("Shenzhen"), "{out}");
         assert!(out.contains("Departed facility"), "{out}");
         assert!(!out.contains("LABEL"), "{out}");
+    }
+
+    #[test]
+    fn detail_scroll_past_end_still_shows_last_event() {
+        let mut app = sample_app();
+        app.mode = Mode::Detail { scroll: 50 };
+        let out = render(&app, 100, 12);
+        assert!(out.contains("Departed facility"), "{out}");
     }
 
     #[test]
