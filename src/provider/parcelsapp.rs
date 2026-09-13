@@ -115,13 +115,21 @@ impl ParcelsAppProvider {
         let config = builder.build().map_err(|e| {
             anyhow::anyhow!("{e}. Set PARCLI_CHROME to your Chrome/Chromium executable.")
         })?;
-        let (browser, mut events) = Browser::launch(config).await.map_err(|e| {
+        let (mut browser, mut events) = Browser::launch(config).await.map_err(|e| {
             anyhow::anyhow!("launching Chrome failed: {e}. Set PARCLI_CHROME to your Chrome/Chromium executable.")
         })?;
         let handler = tokio::spawn(async move { while events.next().await.is_some() {} });
         // parcelsapp.com rejects the default HeadlessChrome UA with NO_DATA; masquerade as
         // regular Chrome (headless already hides navigator.webdriver via `.hide()`).
-        let user_agent = browser.user_agent().await?.replace("HeadlessChrome", "Chrome");
+        let user_agent = match browser.user_agent().await {
+            Ok(ua) => ua.replace("HeadlessChrome", "Chrome"),
+            Err(e) => {
+                let _ = browser.close().await;
+                let _ = browser.wait().await;
+                handler.abort();
+                return Err(e).context("querying browser user agent");
+            }
+        };
         Ok(Self { browser, handler, timeout, user_agent })
     }
 
