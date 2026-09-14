@@ -9,6 +9,7 @@ use crate::app::{App, Mode};
 use crate::provider::Status;
 
 mod detail;
+mod map;
 pub mod theme;
 
 use detail::draw_detail;
@@ -596,5 +597,40 @@ mod tests {
         let out = render(&app, 100, 20);
         assert!(out.contains('┄'), "in-transit strip should show remaining dashes to home:\n{out}");
         assert!(out.contains("Berlin"), "strip should name the home stop:\n{out}");
+    }
+
+    #[test]
+    fn detail_wide_shows_map_with_home_pin() {
+        let mut app = sample_app();
+        app.parcels.home = Some("Berlin".into());
+        app.cache.geo.insert("Shenzhen".into(), Some((22.5445741, 114.0545429)));
+        app.cache.geo.insert("Berlin".into(), Some((52.52, 13.405)));
+        app.mode = Mode::Detail { scroll: 0 };
+        let out = render(&app, 120, 30);
+        assert!(out.contains("map"), "wide detail should show the map pane:\n{out}");
+        assert!(out.contains('⌂'), "map should pin home:\n{out}");
+    }
+
+    #[test]
+    fn detail_narrow_hides_map() {
+        let mut app = sample_app();
+        app.parcels.home = Some("Berlin".into());
+        app.cache.geo.insert("Shenzhen".into(), Some((22.5445741, 114.0545429)));
+        app.cache.geo.insert("Berlin".into(), Some((52.52, 13.405)));
+        app.mode = Mode::Detail { scroll: 0 };
+        let out = render(&app, 90, 30);
+        assert!(!out.contains("map"), "narrow detail should not show the map pane:\n{out}");
+    }
+
+    #[test]
+    fn detail_map_toggle_off_hides_map() {
+        let mut app = sample_app();
+        app.parcels.home = Some("Berlin".into());
+        app.cache.geo.insert("Shenzhen".into(), Some((22.5445741, 114.0545429)));
+        app.cache.geo.insert("Berlin".into(), Some((52.52, 13.405)));
+        app.mode = Mode::Detail { scroll: 0 };
+        app.show_map = false;
+        let out = render(&app, 120, 30);
+        assert!(!out.contains("map"), "show_map=false should hide the map pane:\n{out}");
     }
 }

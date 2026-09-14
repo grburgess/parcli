@@ -11,6 +11,7 @@ use crate::app::App;
 use crate::journey::{journey_stops, render_strip};
 use crate::provider::Status;
 
+use super::map::draw_map;
 use super::{age_color, humanize, status_color, status_pill, theme};
 
 pub(super) fn draw_detail(frame: &mut Frame, area: Rect, app: &App, scroll: u16, now: DateTime<Utc>, tick: usize) {
@@ -24,6 +25,17 @@ pub(super) fn draw_detail(frame: &mut Frame, area: Rect, app: &App, scroll: u16,
     let outer = Block::bordered().border_type(BorderType::Rounded).title(title).border_style(border_style);
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
+
+    let home = app.parcels.home.as_deref();
+    let stops = journey_stops(tracking, home, &app.cache.geo);
+
+    let inner = if app.show_map && inner.width >= 100 {
+        let [left, right] = Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)]).areas(inner);
+        draw_map(frame, right, &stops, sel_status, tick);
+        left
+    } else {
+        inner
+    };
 
     let key_style = Style::default().fg(theme::DIM);
 
@@ -71,8 +83,6 @@ pub(super) fn draw_detail(frame: &mut Frame, area: Rect, app: &App, scroll: u16,
     let card_block = Block::bordered().border_type(BorderType::Rounded).title(" summary ").border_style(border_style);
     frame.render_widget(Paragraph::new(card_lines).block(card_block), card_area);
 
-    let home = app.parcels.home.as_deref();
-    let stops = journey_stops(tracking, home, &app.cache.geo);
     let strip_lines = render_strip(&stops, sel_status, tick, strip_area.width);
     frame.render_widget(Paragraph::new(strip_lines), strip_area);
 
