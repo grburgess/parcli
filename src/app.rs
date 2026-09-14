@@ -5,6 +5,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
 
+use crate::geo::Coord;
 use crate::poller::{PollCommand, PollEvent, PollResult};
 use crate::store::{Parcel, ParcelList, ParcelState, StateCache};
 
@@ -32,6 +33,7 @@ pub struct App {
     pub polling: Option<String>,
     pub last_error: Option<String>,
     pub interval: Duration,
+    pub show_map: bool,
 }
 
 const MAX_BACKOFF: chrono::Duration = chrono::Duration::hours(1);
@@ -47,7 +49,7 @@ pub fn split_number_and_label(input: &str) -> (String, Option<String>) {
 
 impl App {
     pub fn new(parcels: ParcelList, cache: StateCache, interval: Duration) -> Self {
-        Self { parcels, cache, mode: Mode::Normal, selected: 0, polling: None, last_error: None, interval }
+        Self { parcels, cache, mode: Mode::Normal, selected: 0, polling: None, last_error: None, interval, show_map: true }
     }
 
     pub fn selected_parcel(&self) -> Option<&Parcel> {
@@ -56,6 +58,12 @@ impl App {
 
     pub fn state_for(&self, number: &str) -> Option<&ParcelState> {
         self.cache.by_number.get(number)
+    }
+
+    /// Not yet drawn anywhere; wired in by the map rendering that consumes `show_map`.
+    #[allow(dead_code)]
+    pub fn home_coord(&self) -> Option<Coord> {
+        self.parcels.home.as_ref().and_then(|h| self.cache.geo.get(h)).copied().flatten()
     }
 
     fn clamp_selection(&mut self) {
@@ -131,6 +139,10 @@ impl App {
                     vec![]
                 }
                 KeyCode::Char('r') => self.refresh_selected(),
+                KeyCode::Char('m') => {
+                    self.show_map = !self.show_map;
+                    vec![]
+                }
                 _ => vec![],
             },
         }
@@ -161,6 +173,10 @@ impl App {
             }
             KeyCode::Char('r') => self.refresh_selected(),
             KeyCode::Char('R') => vec![Effect::Send(PollCommand::RefreshAll)],
+            KeyCode::Char('m') => {
+                self.show_map = !self.show_map;
+                vec![]
+            }
             KeyCode::Enter => {
                 if self.selected_parcel().is_some() {
                     self.mode = Mode::Detail { scroll: 0 };
@@ -187,6 +203,10 @@ impl App {
                 vec![]
             }
             PollEvent::Finished(r) => self.apply_poll_result(r, now),
+            PollEvent::Geocoded { key, coord } => {
+                self.cache.geo.insert(key, coord);
+                vec![Effect::SaveState]
+            }
         }
     }
 
@@ -451,6 +471,52 @@ mod tests {
         let tracking = Tracking { number: "A".into(), carrier: None, status: Status::Pending, events: vec![], fetched_at: now(), attributes: vec![], tracking_url: None };
         app.apply_poll_event(PollEvent::Finished(PollResult { number: "A".into(), result: Ok(tracking) }), now());
         assert!(app.polling.is_none());
+    }
+
+    #[test]
+    fn m_toggles_show_map_in_normal_and_detail() {
+        let mut app = app_with(&["A"]);
+        assert!(app.show_map, "defaults to shown");
+
+        assert!(app.handle_key(key('m'), now()).is_empty());
+        assert!(!app.show_map);
+        assert!(app.handle_key(key('m'), now()).is_empty());
+        assert!(app.show_map);
+
+        app.handle_key(code(KeyCode::Enter), now());
+        assert!(matches!(app.mode, Mode::Detail { .. }));
+        assert!(app.handle_key(key('m'), now()).is_empty());
+        assert!(!app.show_map);
+        assert!(matches!(app.mode, Mode::Detail { .. }), "toggling the map does not leave Detail mode");
+    }
+
+    #[test]
+    fn geocoded_event_updates_cache_and_saves() {
+        let mut app = app_with(&["A"]);
+        assert!(app.cache.geo.is_empty());
+
+        let effects = app.apply_poll_event(PollEvent::Geocoded { key: "Shenzhen".into(), coord: Some((22.5, 114.0)) }, now());
+        assert_eq!(effects, vec![Effect::SaveState]);
+        assert_eq!(app.cache.geo.get("Shenzhen"), Some(&Some((22.5, 114.0))));
+
+        let effects = app.apply_poll_event(PollEvent::Geocoded { key: "Nowhere".into(), coord: None }, now());
+        assert_eq!(effects, vec![Effect::SaveState]);
+        assert_eq!(app.cache.geo.get("Nowhere"), Some(&None), "a miss is cached too");
+    }
+
+    #[test]
+    fn home_coord_looks_up_home_in_geo_cache() {
+        let mut app = app_with(&[]);
+        assert_eq!(app.home_coord(), None, "no home configured");
+
+        app.parcels.home = Some("Roissy CDG".into());
+        assert_eq!(app.home_coord(), None, "home set but not yet geocoded");
+
+        app.cache.geo.insert("Roissy CDG".into(), Some((49.0, 2.5)));
+        assert_eq!(app.home_coord(), Some((49.0, 2.5)));
+
+        app.cache.geo.insert("Roissy CDG".into(), None);
+        assert_eq!(app.home_coord(), None, "home geocode was a miss");
     }
 
     #[test]

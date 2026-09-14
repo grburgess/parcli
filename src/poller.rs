@@ -5,6 +5,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use tokio::sync::mpsc;
 
+use crate::geo::{normalize_place, Coord, GeoCache, Geocoder};
 use crate::provider::{Provider, Status, TrackEvent, Tracking};
 use crate::store::StateCache;
 use crate::translate::Translator;
@@ -73,6 +74,31 @@ pub struct PollResult {
 pub enum PollEvent {
     Started(String),
     Finished(PollResult),
+    Geocoded { key: String, coord: Option<Coord> },
+}
+
+/// Geocode each event's location, at most once per distinct normalized
+/// location. `Ok(None)` (no match) is cached like a hit. On the first `Err`
+/// the loop stops for this poll — remaining locations are left ungeocoded
+/// and retried on the next poll — mirroring `translate_events`'s circuit
+/// breaker. Already-cached and empty locations are skipped without a call.
+pub async fn geocode_locations(geocoder: &dyn Geocoder, geo: &mut GeoCache, events: &[TrackEvent], out: &mpsc::Sender<PollEvent>) {
+    for e in events {
+        let Some(loc) = e.location.as_deref() else { continue };
+        let key = normalize_place(loc);
+        if key.is_empty() || geo.contains_key(&key) {
+            continue;
+        }
+        match geocoder.geocode(&key, true).await {
+            Ok(coord) => {
+                geo.insert(key.clone(), coord);
+                if out.send(PollEvent::Geocoded { key, coord }).await.is_err() {
+                    return;
+                }
+            }
+            Err(_) => break,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -156,14 +182,28 @@ impl Scheduler {
 }
 
 /// Worker: applies commands, polls one due parcel at a time, reports results.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_poller(
     provider: Arc<dyn Provider>,
     translator: Option<Arc<dyn Translator>>,
     mut translations: TranslationCache,
+    geocoder: Option<Arc<dyn Geocoder>>,
+    mut geo: GeoCache,
+    home: Option<String>,
     mut scheduler: Scheduler,
     mut commands: mpsc::Receiver<PollCommand>,
     results: mpsc::Sender<PollEvent>,
 ) {
+    if let (Some(g), Some(home)) = (&geocoder, &home) {
+        if !home.is_empty() && !geo.contains_key(home) {
+            if let Ok(coord) = g.geocode(home, false).await {
+                geo.insert(home.clone(), coord);
+                if results.send(PollEvent::Geocoded { key: home.clone(), coord }).await.is_err() {
+                    return;
+                }
+            }
+        }
+    }
     let mut tick = tokio::time::interval(Duration::from_millis(500));
     loop {
         tokio::select! {
@@ -187,6 +227,9 @@ pub async fn run_poller(
                     }
                     (r, _) => r,
                 };
+                if let (Ok(t), Some(g)) = (&result, &geocoder) {
+                    geocode_locations(g.as_ref(), &mut geo, &t.events, &results).await;
+                }
                 match &result {
                     Ok(t) => scheduler.record_success(&number, t.status, Utc::now()),
                     Err(_) => scheduler.record_failure(&number, Utc::now()),
@@ -296,7 +339,7 @@ mod tests {
     async fn expect_started(rx: &mut mpsc::Receiver<PollEvent>, number: &str) {
         match rx.recv().await.unwrap() {
             PollEvent::Started(n) => assert_eq!(n, number),
-            PollEvent::Finished(r) => panic!("expected Started({number}), got Finished({r:?})"),
+            other => panic!("expected Started({number}), got {other:?}"),
         }
     }
 
@@ -306,7 +349,7 @@ mod tests {
                 assert_eq!(r.number, number);
                 r
             }
-            PollEvent::Started(n) => panic!("expected Finished, got Started({n})"),
+            other => panic!("expected Finished, got {other:?}"),
         }
     }
 
@@ -316,7 +359,7 @@ mod tests {
         let scheduler = Scheduler::new(Duration::from_secs(600), vec!["A".into()], Utc::now());
         let (cmd_tx, cmd_rx) = mpsc::channel(8);
         let (res_tx, mut res_rx) = mpsc::channel(8);
-        let worker = tokio::spawn(run_poller(provider.clone(), None, HashMap::new(), scheduler, cmd_rx, res_tx));
+        let worker = tokio::spawn(run_poller(provider.clone(), None, HashMap::new(), None, HashMap::new(), None, scheduler, cmd_rx, res_tx));
 
         expect_started(&mut res_rx, "A").await;
         let first = expect_finished(&mut res_rx, "A").await;
@@ -337,7 +380,7 @@ mod tests {
         let scheduler = Scheduler::new(Duration::from_secs(600), vec!["A".into()], Utc::now());
         let (cmd_tx, cmd_rx) = mpsc::channel(8);
         let (res_tx, mut res_rx) = mpsc::channel(8);
-        let worker = tokio::spawn(run_poller(provider, None, HashMap::new(), scheduler, cmd_rx, res_tx));
+        let worker = tokio::spawn(run_poller(provider, None, HashMap::new(), None, HashMap::new(), None, scheduler, cmd_rx, res_tx));
         expect_started(&mut res_rx, "A").await;
         let r = expect_finished(&mut res_rx, "A").await;
         assert_eq!(r.result.unwrap_err(), "boom");
@@ -425,11 +468,113 @@ mod tests {
         let scheduler = Scheduler::new(Duration::from_secs(600), vec!["A".into()], Utc::now());
         let (cmd_tx, cmd_rx) = mpsc::channel(8);
         let (res_tx, mut res_rx) = mpsc::channel(8);
-        let worker = tokio::spawn(run_poller(provider, Some(translator), HashMap::new(), scheduler, cmd_rx, res_tx));
+        let worker = tokio::spawn(run_poller(provider, Some(translator), HashMap::new(), None, HashMap::new(), None, scheduler, cmd_rx, res_tx));
         expect_started(&mut res_rx, "A").await;
         let r = expect_finished(&mut res_rx, "A").await;
         assert_eq!(r.result.unwrap().events[0].translated.as_deref(), Some("[en] moving"));
         cmd_tx.send(PollCommand::Shutdown).await.unwrap();
         worker.await.unwrap();
+    }
+
+    struct FakeGeocoder {
+        calls: Mutex<Vec<(String, bool)>>,
+        responses: HashMap<String, Result<Option<Coord>, ()>>,
+    }
+
+    #[async_trait]
+    impl Geocoder for FakeGeocoder {
+        async fn geocode(&self, query: &str, settlement_only: bool) -> anyhow::Result<Option<Coord>> {
+            self.calls.lock().unwrap().push((query.to_owned(), settlement_only));
+            match self.responses.get(query) {
+                Some(Ok(coord)) => Ok(*coord),
+                Some(Err(())) => anyhow::bail!("boom"),
+                None => Ok(None),
+            }
+        }
+    }
+
+    fn loc(location: &str) -> TrackEvent {
+        TrackEvent { time: None, description: "x".into(), location: Some(location.into()), translated: None }
+    }
+
+    #[tokio::test]
+    async fn geocode_locations_dedups_skips_cached_and_sends_events() {
+        let mut responses = HashMap::new();
+        responses.insert("Shenzhen".to_string(), Ok(Some((22.5, 114.0))));
+        responses.insert("Nowhere".to_string(), Ok(None));
+        responses.insert("Boom".to_string(), Err(()));
+        let geocoder = FakeGeocoder { calls: Mutex::new(vec![]), responses };
+        let mut geo: GeoCache = HashMap::new();
+        let events = vec![loc("Shenzhen"), loc("Shenzhen "), loc("Nowhere"), loc("Boom"), loc("Paris")];
+        let (tx, mut rx) = mpsc::channel(8);
+
+        geocode_locations(&geocoder, &mut geo, &events, &tx).await;
+        drop(tx);
+
+        assert_eq!(
+            *geocoder.calls.lock().unwrap(),
+            vec![("Shenzhen".to_string(), true), ("Nowhere".to_string(), true), ("Boom".to_string(), true)],
+            "dedups whitespace variants; stops after the Boom error; Paris never reached"
+        );
+
+        let mut sent = vec![];
+        while let Some(e) = rx.recv().await {
+            match e {
+                PollEvent::Geocoded { key, coord } => sent.push((key, coord)),
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert_eq!(sent, vec![("Shenzhen".to_string(), Some((22.5, 114.0))), ("Nowhere".to_string(), None)]);
+
+        assert_eq!(geo.get("Shenzhen"), Some(&Some((22.5, 114.0))));
+        assert_eq!(geo.get("Nowhere"), Some(&None), "Ok(None) is cached too");
+        assert!(!geo.contains_key("Paris"), "never reached: loop broke on Boom's error");
+        assert!(!geo.contains_key("Boom"), "Err is not cached");
+    }
+
+    #[tokio::test]
+    async fn worker_geocodes_home_once_at_start() {
+        let provider = Arc::new(MockProvider { calls: Mutex::new(vec![]), fail: false });
+        let mut responses = HashMap::new();
+        responses.insert("123 Main St".to_string(), Ok(Some((1.0, 2.0))));
+        let geocoder = Arc::new(FakeGeocoder { calls: Mutex::new(vec![]), responses });
+        let dyn_geocoder: Arc<dyn Geocoder> = geocoder.clone();
+        let scheduler = Scheduler::new(Duration::from_secs(600), vec!["A".into()], Utc::now());
+        let (cmd_tx, cmd_rx) = mpsc::channel(8);
+        let (res_tx, mut res_rx) = mpsc::channel(8);
+        let worker = tokio::spawn(run_poller(
+            provider,
+            None,
+            HashMap::new(),
+            Some(dyn_geocoder),
+            HashMap::new(),
+            Some("123 Main St".into()),
+            scheduler,
+            cmd_rx,
+            res_tx,
+        ));
+
+        match res_rx.recv().await.unwrap() {
+            PollEvent::Geocoded { key, coord } => {
+                assert_eq!(key, "123 Main St");
+                assert_eq!(coord, Some((1.0, 2.0)));
+            }
+            other => panic!("expected Geocoded, got {other:?}"),
+        }
+        expect_started(&mut res_rx, "A").await;
+        expect_finished(&mut res_rx, "A").await;
+
+        cmd_tx.send(PollCommand::Add("B".into())).await.unwrap();
+        expect_started(&mut res_rx, "B").await;
+        expect_finished(&mut res_rx, "B").await;
+
+        cmd_tx.send(PollCommand::Shutdown).await.unwrap();
+        worker.await.unwrap();
+
+        assert_eq!(
+            *geocoder.calls.lock().unwrap(),
+            vec![("123 Main St".to_string(), false)],
+            "home is geocoded exactly once at start, with settlement_only=false, regardless of how many parcels poll afterward"
+        );
     }
 }

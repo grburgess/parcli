@@ -1,5 +1,4 @@
 mod app;
-#[allow(dead_code)]
 mod geo;
 mod poller;
 mod provider;
@@ -17,6 +16,7 @@ use clap::Parser;
 use tokio::sync::mpsc;
 
 use crate::app::App;
+use crate::geo::{Geocoder, NominatimGeocoder};
 use crate::poller::{run_poller, seed_translation_cache, PollCommand, Scheduler};
 use crate::provider::parcelsapp::ParcelsAppProvider;
 use crate::store::{ParcelList, Paths, StateCache};
@@ -35,6 +35,9 @@ struct Args {
     /// Show carrier text as-is instead of translating to English
     #[arg(long)]
     no_translate: bool,
+    /// Set your home address (used for the map and journey); saved to parcels.toml
+    #[arg(long, value_name = "ADDRESS")]
+    home: Option<String>,
 }
 
 #[tokio::main]
@@ -43,8 +46,13 @@ async fn main() -> Result<()> {
     let interval = Duration::from_secs(args.interval * 60);
 
     let paths = Paths::discover()?;
-    let parcels = ParcelList::load(&paths.parcels)?;
+    let mut parcels = ParcelList::load(&paths.parcels)?;
     let cache = StateCache::load(&paths.state)?;
+
+    if let Some(home) = args.home {
+        parcels.home = Some(home);
+        parcels.save(&paths.parcels)?;
+    }
 
     let provider = ParcelsAppProvider::launch(Duration::from_secs(args.timeout))
         .await
@@ -65,10 +73,21 @@ async fn main() -> Result<()> {
 
     let translator: Option<Arc<dyn Translator>> = if args.no_translate { None } else { Some(Arc::new(MyMemoryTranslator::new()?)) };
     let translations = seed_translation_cache(&cache);
+    let geocoder: Arc<dyn Geocoder> = Arc::new(NominatimGeocoder::new()?);
 
     let (cmd_tx, cmd_rx) = mpsc::channel::<PollCommand>(32);
     let (res_tx, res_rx) = mpsc::channel(32);
-    let worker = tokio::spawn(run_poller(provider.clone(), translator, translations, scheduler, cmd_rx, res_tx));
+    let worker = tokio::spawn(run_poller(
+        provider.clone(),
+        translator,
+        translations,
+        Some(geocoder),
+        cache.geo.clone(),
+        parcels.home.clone(),
+        scheduler,
+        cmd_rx,
+        res_tx,
+    ));
 
     let app = App::new(parcels, cache, interval);
     let outcome = tui::run(app, paths, cmd_tx.clone(), res_rx).await;
