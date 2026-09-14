@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Cell, List, ListItem, Paragraph, Row, Table, TableState};
+use ratatui::widgets::{Block, BorderType, Cell, List, ListItem, Paragraph, Row, Table, TableState};
 use ratatui::Frame;
 
 use crate::app::{App, Mode};
@@ -68,7 +68,7 @@ pub fn draw(frame: &mut Frame, app: &App, now: DateTime<Utc>, spinner_tick: usiz
         Layout::vertical([Constraint::Length(1), Constraint::Min(1), Constraint::Length(1)]).areas(frame.area());
     draw_header(frame, header, app, now);
     match &app.mode {
-        Mode::Detail { scroll } => draw_detail(frame, body, app, *scroll),
+        Mode::Detail { scroll } => draw_detail(frame, body, app, *scroll, now),
         _ => draw_table(frame, body, app, now, spinner_tick),
     }
     draw_footer(frame, footer, app);
@@ -175,39 +175,118 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc>, spin
     frame.render_stateful_widget(table, inner, &mut state);
 }
 
-fn draw_detail(frame: &mut Frame, area: Rect, app: &App, scroll: u16) {
+fn draw_detail(frame: &mut Frame, area: Rect, app: &App, scroll: u16, now: DateTime<Utc>) {
     let Some(parcel) = app.selected_parcel() else { return };
-    let tracking = app.state_for(&parcel.number).and_then(|s| s.tracking.as_ref());
-    let title = match (&parcel.label, tracking.and_then(|t| t.carrier.as_deref())) {
-        (Some(l), Some(c)) => format!(" {l} · {} · {c} ", parcel.number),
-        (Some(l), None) => format!(" {l} · {} ", parcel.number),
-        (None, Some(c)) => format!(" {} · {c} ", parcel.number),
-        (None, None) => format!(" {} ", parcel.number),
-    };
-    let items: Vec<ListItem> = match tracking {
-        None => vec![ListItem::new("no data yet")],
-        Some(t) if t.events.is_empty() => vec![ListItem::new("no events reported")],
-        Some(t) => t
-            .events
-            .iter()
-            .skip((scroll as usize).min(t.events.len().saturating_sub(1)))
-            .map(|e| {
-                let when = e.time.map(|d| d.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_else(|| "—".repeat(8));
-                let loc = e.location.clone().unwrap_or_default();
-                ListItem::new(Line::from(vec![
-                    Span::styled(format!("{when}  "), Style::default().fg(Color::DarkGray)),
-                    Span::styled(format!("{loc:<20} "), Style::default().fg(Color::Cyan)),
-                    Span::raw(e.description.clone()),
-                ]))
-            })
-            .collect(),
-    };
-    let status = tracking.map(|t| t.status).unwrap_or(Status::Unknown);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(title)
-        .title_bottom(Line::from(status_pill(status)));
-    frame.render_widget(List::new(items).block(block), area);
+    let state = app.state_for(&parcel.number);
+    let tracking = state.and_then(|s| s.tracking.as_ref());
+
+    let title = format!(" {} ", parcel.label.as_deref().unwrap_or(&parcel.number));
+    let outer = Block::bordered().border_type(BorderType::Rounded).title(title);
+    let inner = outer.inner(area);
+    frame.render_widget(outer, area);
+
+    let key_style = Style::default().fg(Color::DarkGray);
+
+    let mut card_lines: Vec<Line> = vec![
+        Line::from(vec![Span::styled("Number       ", key_style), Span::raw(parcel.number.clone())]),
+    ];
+    if let Some(label) = &parcel.label {
+        card_lines.push(Line::from(vec![Span::styled("Label        ", key_style), Span::raw(label.clone())]));
+    }
+    if let Some(carrier) = tracking.and_then(|t| t.carrier.as_deref()) {
+        card_lines.push(Line::from(vec![
+            Span::styled("Carrier      ", key_style),
+            Span::styled(carrier.to_string(), Style::default().fg(Color::Magenta)),
+        ]));
+    }
+    if let Some(t) = tracking {
+        card_lines.push(Line::from(vec![Span::styled("Status       ", key_style), status_pill(t.status)]));
+        for (name, value) in &t.attributes {
+            card_lines.push(Line::from(vec![Span::styled(format!("{name}  "), key_style), Span::raw(value.clone())]));
+        }
+        card_lines.push(Line::from(vec![
+            Span::styled("Last update  ", key_style),
+            Span::raw(format!("{} ago", humanize(now - t.fetched_at))),
+        ]));
+    }
+    if let Some(s) = state {
+        let next = if s.next_poll <= now { "done".to_string() } else { humanize(s.next_poll - now) };
+        card_lines.push(Line::from(vec![Span::styled("Next poll    ", key_style), Span::raw(next)]));
+    }
+    if let Some(url) = tracking.and_then(|t| t.tracking_url.as_deref()) {
+        card_lines.push(Line::from(vec![
+            Span::styled("Tracking link  ", key_style),
+            Span::styled(url.to_string(), Style::default().fg(Color::DarkGray)),
+        ]));
+    }
+
+    let max_card_height = inner.height.saturating_sub(4).max(3);
+    let card_height = ((card_lines.len() as u16) + 2).min(max_card_height);
+    let [card_area, timeline_area] = Layout::vertical([Constraint::Length(card_height), Constraint::Min(3)]).areas(inner);
+
+    let card_block = Block::bordered().border_type(BorderType::Rounded).title(" summary ");
+    frame.render_widget(Paragraph::new(card_lines).block(card_block), card_area);
+
+    let event_count = tracking.map(|t| t.events.len()).unwrap_or(0);
+    let timeline_block =
+        Block::bordered().border_type(BorderType::Rounded).title(format!(" events ({event_count}) "));
+
+    match tracking {
+        None => {
+            let msg = match state.and_then(|s| s.last_error.as_ref()) {
+                Some(err) => Paragraph::new(vec![
+                    Line::from("no data yet"),
+                    Line::from(Span::styled(format!("last error: {err}"), Style::default().fg(Color::Red))),
+                ]),
+                None => Paragraph::new("no data yet"),
+            };
+            frame.render_widget(msg.block(timeline_block), timeline_area);
+        }
+        Some(t) if t.events.is_empty() => {
+            frame.render_widget(Paragraph::new("no events reported").block(timeline_block), timeline_area);
+        }
+        Some(t) => {
+            let items: Vec<ListItem> = t
+                .events
+                .iter()
+                .enumerate()
+                .skip((scroll as usize).min(t.events.len().saturating_sub(1)))
+                .map(|(i, e)| {
+                    let is_newest = i == 0;
+                    let dot = if is_newest {
+                        Span::styled("● ", Style::default().fg(status_color(t.status)))
+                    } else {
+                        Span::styled("│ ", Style::default().fg(Color::DarkGray))
+                    };
+                    let when = e.time.map(|d| d.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_else(|| "—".repeat(16));
+                    let loc = e.location.clone().unwrap_or_default();
+                    let mut text_style = Style::default();
+                    if is_newest {
+                        text_style = text_style.add_modifier(Modifier::BOLD);
+                    }
+                    let mut lines = vec![Line::from(vec![
+                        dot,
+                        Span::styled(format!("{when}  "), Style::default().fg(Color::DarkGray)),
+                        Span::styled(format!("{loc:<20} "), Style::default().fg(Color::Cyan)),
+                        Span::styled(e.display_text().to_string(), text_style),
+                    ])];
+                    if let Some(translated) = &e.translated {
+                        if translated != &e.description {
+                            lines.push(Line::from(vec![
+                                Span::styled("│ ", Style::default().fg(Color::DarkGray)),
+                                Span::styled(
+                                    e.description.clone(),
+                                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                                ),
+                            ]));
+                        }
+                    }
+                    ListItem::new(lines)
+                })
+                .collect();
+            frame.render_widget(List::new(items).block(timeline_block), timeline_area);
+        }
+    }
 }
 
 fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
@@ -367,6 +446,53 @@ mod tests {
         app.mode = Mode::Detail { scroll: 50 };
         let out = render(&app, 100, 12);
         assert!(out.contains("Departed facility"), "{out}");
+    }
+
+    #[test]
+    fn detail_shows_summary_card_and_timeline_with_original_text() {
+        let mut app = sample_app();
+        {
+            let st = app.cache.by_number.get_mut("RB123456789CN").unwrap();
+            let t = st.tracking.as_mut().unwrap();
+            t.events[0].translated = Some("Left the facility".into());
+            t.attributes = vec![("Days in transit".into(), "2".into())];
+            t.tracking_url = Some("https://example.test/track".into());
+        }
+        app.mode = Mode::Detail { scroll: 0 };
+        let out = render(&app, 100, 20);
+        for needle in [
+            "summary",
+            "Number",
+            "RB123456789CN",
+            "Carrier",
+            "China Post",
+            "Days in transit",
+            "2",
+            "Tracking link",
+            "https://example.test/track",
+            "events (1)",
+            "●",
+            "Left the facility",
+            "Departed facility",
+            "Shenzhen",
+        ] {
+            assert!(out.contains(needle), "missing {needle:?} in:\n{out}");
+        }
+    }
+
+    #[test]
+    fn detail_without_data_shows_placeholder_and_error() {
+        let mut app = sample_app();
+        app.selected = 1; // 1Z999… has no cache entry
+        app.mode = Mode::Detail { scroll: 0 };
+        let out = render(&app, 100, 16);
+        assert!(out.contains("no data yet"), "{out}");
+        app.cache.by_number.insert(
+            "1Z999AA10123456784".into(),
+            crate::store::ParcelState { tracking: None, last_error: Some("timed out".into()), failures: 1, next_poll: now() },
+        );
+        let out = render(&app, 100, 16);
+        assert!(out.contains("timed out"), "{out}");
     }
 
     #[test]
