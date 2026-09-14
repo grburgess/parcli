@@ -1,11 +1,45 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use tokio::sync::mpsc;
 
-use crate::provider::{Provider, Status, Tracking};
+use crate::provider::{Provider, Status, TrackEvent, Tracking};
+use crate::store::StateCache;
+use crate::translate::Translator;
+
+pub type TranslationCache = HashMap<String, Option<String>>;
+
+/// Rebuild the description→translation map from previously persisted events.
+pub fn seed_translation_cache(cache: &StateCache) -> TranslationCache {
+    cache
+        .by_number
+        .values()
+        .filter_map(|s| s.tracking.as_ref())
+        .flat_map(|t| t.events.iter())
+        .filter_map(|e| e.translated.clone().map(|tr| (e.description.clone(), Some(tr))))
+        .collect()
+}
+
+/// Fill `translated` on events, consulting/updating the cache; failures are
+/// logged into nothing and simply leave the original text.
+pub async fn translate_events(translator: &dyn Translator, cache: &mut TranslationCache, events: &mut [TrackEvent]) {
+    for e in events.iter_mut() {
+        if e.translated.is_some() || e.description.trim().is_empty() {
+            continue;
+        }
+        if let Some(cached) = cache.get(&e.description) {
+            e.translated = cached.clone();
+            continue;
+        }
+        // best effort; failures simply leave the original text, retried on a later poll
+        if let Ok(result) = translator.translate(&e.description).await {
+            cache.insert(e.description.clone(), result.clone());
+            e.translated = result;
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PollCommand {
@@ -114,6 +148,8 @@ impl Scheduler {
 /// Worker: applies commands, polls one due parcel at a time, reports results.
 pub async fn run_poller(
     provider: Arc<dyn Provider>,
+    translator: Option<Arc<dyn Translator>>,
+    mut translations: TranslationCache,
     mut scheduler: Scheduler,
     mut commands: mpsc::Receiver<PollCommand>,
     results: mpsc::Sender<PollEvent>,
@@ -134,6 +170,13 @@ pub async fn run_poller(
                     return;
                 }
                 let result = provider.track(&number).await.map_err(|e| e.to_string());
+                let result = match (result, &translator) {
+                    (Ok(mut t), Some(tr)) => {
+                        translate_events(tr.as_ref(), &mut translations, &mut t.events).await;
+                        Ok(t)
+                    }
+                    (r, _) => r,
+                };
                 match &result {
                     Ok(t) => scheduler.record_success(&number, t.status, Utc::now()),
                     Err(_) => scheduler.record_failure(&number, Utc::now()),
@@ -150,6 +193,7 @@ pub async fn run_poller(
 mod tests {
     use super::*;
     use crate::provider::TrackEvent;
+    use crate::translate::Translator;
     use async_trait::async_trait;
     use chrono::TimeZone;
     use std::sync::Mutex;
@@ -239,16 +283,19 @@ mod tests {
         }
     }
 
-    fn expect_started(ev: PollEvent, number: &str) {
-        match ev {
+    async fn expect_started(rx: &mut mpsc::Receiver<PollEvent>, number: &str) {
+        match rx.recv().await.unwrap() {
             PollEvent::Started(n) => assert_eq!(n, number),
             PollEvent::Finished(r) => panic!("expected Started({number}), got Finished({r:?})"),
         }
     }
 
-    fn expect_finished(ev: PollEvent) -> PollResult {
-        match ev {
-            PollEvent::Finished(r) => r,
+    async fn expect_finished(rx: &mut mpsc::Receiver<PollEvent>, number: &str) -> PollResult {
+        match rx.recv().await.unwrap() {
+            PollEvent::Finished(r) => {
+                assert_eq!(r.number, number);
+                r
+            }
             PollEvent::Started(n) => panic!("expected Finished, got Started({n})"),
         }
     }
@@ -259,17 +306,15 @@ mod tests {
         let scheduler = Scheduler::new(Duration::from_secs(600), vec!["A".into()], Utc::now());
         let (cmd_tx, cmd_rx) = mpsc::channel(8);
         let (res_tx, mut res_rx) = mpsc::channel(8);
-        let worker = tokio::spawn(run_poller(provider.clone(), scheduler, cmd_rx, res_tx));
+        let worker = tokio::spawn(run_poller(provider.clone(), None, HashMap::new(), scheduler, cmd_rx, res_tx));
 
-        expect_started(res_rx.recv().await.unwrap(), "A");
-        let first = expect_finished(res_rx.recv().await.unwrap());
-        assert_eq!(first.number, "A");
+        expect_started(&mut res_rx, "A").await;
+        let first = expect_finished(&mut res_rx, "A").await;
         assert!(first.result.is_ok());
 
         cmd_tx.send(PollCommand::Add("B".into())).await.unwrap();
-        expect_started(res_rx.recv().await.unwrap(), "B");
-        let second = expect_finished(res_rx.recv().await.unwrap());
-        assert_eq!(second.number, "B");
+        expect_started(&mut res_rx, "B").await;
+        expect_finished(&mut res_rx, "B").await;
 
         cmd_tx.send(PollCommand::Shutdown).await.unwrap();
         worker.await.unwrap();
@@ -282,10 +327,92 @@ mod tests {
         let scheduler = Scheduler::new(Duration::from_secs(600), vec!["A".into()], Utc::now());
         let (cmd_tx, cmd_rx) = mpsc::channel(8);
         let (res_tx, mut res_rx) = mpsc::channel(8);
-        let worker = tokio::spawn(run_poller(provider, scheduler, cmd_rx, res_tx));
-        expect_started(res_rx.recv().await.unwrap(), "A");
-        let r = expect_finished(res_rx.recv().await.unwrap());
+        let worker = tokio::spawn(run_poller(provider, None, HashMap::new(), scheduler, cmd_rx, res_tx));
+        expect_started(&mut res_rx, "A").await;
+        let r = expect_finished(&mut res_rx, "A").await;
         assert_eq!(r.result.unwrap_err(), "boom");
+        cmd_tx.send(PollCommand::Shutdown).await.unwrap();
+        worker.await.unwrap();
+    }
+
+    struct FakeTranslator {
+        calls: Mutex<Vec<String>>,
+        fail: bool,
+    }
+
+    #[async_trait]
+    impl Translator for FakeTranslator {
+        async fn translate(&self, text: &str) -> anyhow::Result<Option<String>> {
+            self.calls.lock().unwrap().push(text.to_owned());
+            if self.fail {
+                anyhow::bail!("quota");
+            }
+            Ok(if text.starts_with("EN:") { None } else { Some(format!("[en] {text}")) })
+        }
+    }
+
+    fn ev(desc: &str) -> TrackEvent {
+        TrackEvent { time: None, description: desc.into(), location: None, translated: None }
+    }
+
+    #[tokio::test]
+    async fn translate_events_fills_and_caches() {
+        let t = FakeTranslator { calls: Mutex::new(vec![]), fail: false };
+        let mut cache = HashMap::new();
+        let mut events = vec![ev("Colis"), ev("EN: Delivered"), ev("Colis")];
+        translate_events(&t, &mut cache, &mut events).await;
+        assert_eq!(events[0].translated.as_deref(), Some("[en] Colis"));
+        assert_eq!(events[1].translated, None);
+        assert_eq!(events[2].translated.as_deref(), Some("[en] Colis"));
+        assert_eq!(t.calls.lock().unwrap().len(), 2, "duplicate description translated once");
+        assert_eq!(cache.get("EN: Delivered"), Some(&None), "same-language result is cached too");
+        // second pass hits the cache only
+        let mut again = vec![ev("Colis")];
+        translate_events(&t, &mut cache, &mut again).await;
+        assert_eq!(t.calls.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn translate_events_failure_leaves_original_and_is_not_cached() {
+        let t = FakeTranslator { calls: Mutex::new(vec![]), fail: true };
+        let mut cache = HashMap::new();
+        let mut events = vec![ev("Colis")];
+        translate_events(&t, &mut cache, &mut events).await;
+        assert_eq!(events[0].translated, None);
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn seed_translation_cache_from_state() {
+        use crate::store::{ParcelState, StateCache};
+        let mut cache = StateCache::default();
+        let mut tr = Tracking {
+            number: "A".into(),
+            carrier: None,
+            status: Status::InTransit,
+            events: vec![ev("Colis"), ev("Plain")],
+            fetched_at: Utc::now(),
+            attributes: vec![],
+            tracking_url: None,
+        };
+        tr.events[0].translated = Some("Parcel".into());
+        cache.by_number.insert("A".into(), ParcelState { tracking: Some(tr), last_error: None, failures: 0, next_poll: Utc::now() });
+        let seeded = seed_translation_cache(&cache);
+        assert_eq!(seeded.get("Colis"), Some(&Some("Parcel".to_string())));
+        assert!(!seeded.contains_key("Plain"));
+    }
+
+    #[tokio::test]
+    async fn worker_translates_before_reporting() {
+        let provider = Arc::new(MockProvider { calls: Mutex::new(vec![]), fail: false }); // its events have description "moving"
+        let translator: Arc<dyn Translator> = Arc::new(FakeTranslator { calls: Mutex::new(vec![]), fail: false });
+        let scheduler = Scheduler::new(Duration::from_secs(600), vec!["A".into()], Utc::now());
+        let (cmd_tx, cmd_rx) = mpsc::channel(8);
+        let (res_tx, mut res_rx) = mpsc::channel(8);
+        let worker = tokio::spawn(run_poller(provider, Some(translator), HashMap::new(), scheduler, cmd_rx, res_tx));
+        expect_started(&mut res_rx, "A").await;
+        let r = expect_finished(&mut res_rx, "A").await;
+        assert_eq!(r.result.unwrap().events[0].translated.as_deref(), Some("[en] moving"));
         cmd_tx.send(PollCommand::Shutdown).await.unwrap();
         worker.await.unwrap();
     }
