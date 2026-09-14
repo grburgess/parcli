@@ -12,6 +12,9 @@ use crate::translate::Translator;
 pub type TranslationCache = HashMap<String, Option<String>>;
 
 /// Rebuild the description→translation map from previously persisted events.
+/// `translate_events` stores `translated = Some(description)` even for
+/// already-English text, so this also seeds the cache for descriptions that
+/// needed no translation — restarts never re-look those up either.
 pub fn seed_translation_cache(cache: &StateCache) -> TranslationCache {
     cache
         .by_number
@@ -22,8 +25,12 @@ pub fn seed_translation_cache(cache: &StateCache) -> TranslationCache {
         .collect()
 }
 
-/// Fill `translated` on events, consulting/updating the cache; failures are
-/// logged into nothing and simply leave the original text.
+/// Fill `translated` on events, consulting/updating the cache. `Ok(None)`
+/// (already English) is persisted as `Some(description)` so a restart never
+/// re-requests translation for text already known not to need it. On the
+/// first `Err` the loop stops for this poll — remaining events are left
+/// untranslated and retried on the next poll — bounding the worst case to one
+/// translator timeout per poll.
 pub async fn translate_events(translator: &dyn Translator, cache: &mut TranslationCache, events: &mut [TrackEvent]) {
     for e in events.iter_mut() {
         if e.translated.is_some() || e.description.trim().is_empty() {
@@ -33,10 +40,13 @@ pub async fn translate_events(translator: &dyn Translator, cache: &mut Translati
             e.translated = cached.clone();
             continue;
         }
-        // best effort; failures simply leave the original text, retried on a later poll
-        if let Ok(result) = translator.translate(&e.description).await {
-            cache.insert(e.description.clone(), result.clone());
-            e.translated = result;
+        match translator.translate(&e.description).await {
+            Ok(result) => {
+                let result = result.or_else(|| Some(e.description.clone()));
+                cache.insert(e.description.clone(), result.clone());
+                e.translated = result;
+            }
+            Err(_) => break,
         }
     }
 }
@@ -362,10 +372,14 @@ mod tests {
         let mut events = vec![ev("Colis"), ev("EN: Delivered"), ev("Colis")];
         translate_events(&t, &mut cache, &mut events).await;
         assert_eq!(events[0].translated.as_deref(), Some("[en] Colis"));
-        assert_eq!(events[1].translated, None);
+        assert_eq!(events[1].translated.as_deref(), Some("EN: Delivered"), "already-English text is persisted, not left None");
         assert_eq!(events[2].translated.as_deref(), Some("[en] Colis"));
         assert_eq!(t.calls.lock().unwrap().len(), 2, "duplicate description translated once");
-        assert_eq!(cache.get("EN: Delivered"), Some(&None), "same-language result is cached too");
+        assert_eq!(
+            cache.get("EN: Delivered"),
+            Some(&Some("EN: Delivered".to_string())),
+            "same-language result is cached as itself too"
+        );
         // second pass hits the cache only
         let mut again = vec![ev("Colis")];
         translate_events(&t, &mut cache, &mut again).await;
@@ -376,10 +390,12 @@ mod tests {
     async fn translate_events_failure_leaves_original_and_is_not_cached() {
         let t = FakeTranslator { calls: Mutex::new(vec![]), fail: true };
         let mut cache = HashMap::new();
-        let mut events = vec![ev("Colis")];
+        let mut events = vec![ev("Colis"), ev("Autre")];
         translate_events(&t, &mut cache, &mut events).await;
         assert_eq!(events[0].translated, None);
+        assert_eq!(events[1].translated, None);
         assert!(cache.is_empty());
+        assert_eq!(t.calls.lock().unwrap().len(), 1, "circuit breaker: stop after the first failure");
     }
 
     #[test]

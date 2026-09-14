@@ -184,7 +184,7 @@ All handlers are pure functions on `App` returning `Vec<Effect>` (`SaveParcels`,
 
 - MyMemory translation in the poller with per-description cache persisted via `TrackEvent.translated` in `state.json`.
 - `--no-translate` flag disables translation for raw carrier text display.
-- `Tracking.attributes` and `tracking_url` parsed from the widget response and stored for future use.
+- `Tracking.attributes` and `tracking_url` parsed from the widget response and rendered in the detail summary card.
 - Table: rounded block, Black-on-Cyan header, status pill, staleness-colored AGE (green → yellow → red), `▰▱` poll progress bar in NEXT column, zebra rows, header clock.
 - Detail: summary card with aligned keys + `●`/`│` event timeline with original text beneath translations.
 - parcelsapp keys on the `HeadlessChrome` UA, so the provider overrides the UA.

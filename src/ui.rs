@@ -204,7 +204,13 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App, scroll: u16, now: DateT
         rows.push((String::from("Last update"), Span::raw(last_update)));
     }
     if let Some(s) = state {
-        let next = if s.next_poll <= now { "done".to_string() } else { humanize(s.next_poll - now) };
+        let next = if app.polling.as_deref() == Some(parcel.number.as_str()) {
+            "polling".to_string()
+        } else if tracking.map(|t| t.status) == Some(Status::Delivered) {
+            "done".to_string()
+        } else {
+            humanize(s.next_poll - now)
+        };
         rows.push((String::from("Next poll"), Span::raw(next)));
     }
     if let Some(url) = tracking.and_then(|t| t.tracking_url.as_deref()) {
@@ -484,6 +490,60 @@ mod tests {
         let expected_attr = format!("{:<key_w$}  {}", "Days in transit", "2");
         assert!(out.contains(&expected_number), "keys not aligned, missing {expected_number:?} in:\n{out}");
         assert!(out.contains(&expected_attr), "keys not aligned, missing {expected_attr:?} in:\n{out}");
+    }
+
+    #[test]
+    fn detail_event_already_english_renders_one_line_not_two() {
+        let mut app = sample_app();
+        {
+            let st = app.cache.by_number.get_mut("RB123456789CN").unwrap();
+            // Same text stored as `translated` (as translate_events now persists for
+            // already-English text) must not print a duplicate original line beneath.
+            st.tracking.as_mut().unwrap().events[0].translated = Some("Departed facility".into());
+        }
+        app.mode = Mode::Detail { scroll: 0 };
+        let out = render(&app, 100, 20);
+        assert_eq!(out.matches("Departed facility").count(), 1, "should not duplicate the original line:\n{out}");
+    }
+
+    #[test]
+    fn detail_next_poll_mirrors_table_for_delivered_and_overdue() {
+        let mut app = sample_app();
+        {
+            let st = app.cache.by_number.get_mut("RB123456789CN").unwrap();
+            st.tracking.as_mut().unwrap().status = Status::Delivered;
+            st.next_poll = now() + chrono::Duration::minutes(10); // not overdue, but delivered
+        }
+        app.mode = Mode::Detail { scroll: 0 };
+        let out = render(&app, 100, 20);
+        // No `tracking_url`/attributes set here, so the card's longest key is "Last update".
+        let keys = ["Number", "Label", "Carrier", "Status", "Last update", "Next poll"];
+        let key_w = keys.iter().map(|k| k.chars().count()).max().unwrap();
+        let expected_done = format!("{:<key_w$}  {}", "Next poll", "done");
+        assert!(out.contains(&expected_done), "delivered parcel should show done:\n{out}");
+
+        // Overdue but not delivered: table shows "now" via humanize, detail must match.
+        app.selected = 1;
+        app.cache.by_number.insert(
+            "1Z999AA10123456784".into(),
+            ParcelState {
+                tracking: Some(Tracking {
+                    number: "1Z999AA10123456784".into(),
+                    carrier: None,
+                    status: Status::InTransit,
+                    events: vec![],
+                    fetched_at: now(),
+                    attributes: vec![],
+                    tracking_url: None,
+                }),
+                last_error: None,
+                failures: 0,
+                next_poll: now() - chrono::Duration::minutes(1),
+            },
+        );
+        let out = render(&app, 100, 20);
+        let expected_now = format!("{:<key_w$}  {}", "Next poll", "now");
+        assert!(out.contains(&expected_now), "overdue non-delivered parcel should show now:\n{out}");
     }
 
     #[test]

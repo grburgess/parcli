@@ -34,7 +34,7 @@ an hour.
 
 ## Translation
 
-Carrier messages that are not in English are translated to English with the free, anonymous [MyMemory](https://mymemory.translated.net) API (roughly 5,000 characters per day). Each distinct message is translated once and cached in `state.json`, so polling costs nothing extra afterwards. The table shows the English text; the detail view shows the original beneath it. Use `--no-translate` to turn this off.
+Carrier messages that are not in English are translated to English with the free, anonymous [MyMemory](https://mymemory.translated.net) API (roughly 5,000 characters per day). Each distinct message is looked up once (whether or not it needed translating) and the result is cached in `state.json`, so later polls and restarts cost nothing. The table shows the English text; the detail view shows the original beneath it. Use `--no-translate` to turn this off.
 
 ## Files
 
