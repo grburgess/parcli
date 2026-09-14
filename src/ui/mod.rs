@@ -92,10 +92,13 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc>) {
         .min()
         .map(|t| format!("next poll {}", humanize(t - now)))
         .unwrap_or_else(|| "next poll —".into());
-    let home_span = if app.parcels.home.is_some() {
-        Span::styled("⌂ set", Style::default().fg(Color::Green))
-    } else {
-        Span::styled("⌂ unset", Style::default().fg(theme::DIM))
+    let home_span = match app.parcels.home.as_deref() {
+        Some(home) => match app.cache.geo.get(home) {
+            Some(Some(_)) => Span::styled("⌂ set", Style::default().fg(Color::Green)),
+            Some(None) => Span::styled("⌂ unresolved", Style::default().fg(theme::WARN)),
+            None => Span::styled("⌂ locating…", Style::default().fg(theme::DIM)),
+        },
+        None => Span::styled("⌂ unset", Style::default().fg(theme::DIM)),
     };
     let mut spans = vec![
         Span::styled(" parcli ", Style::default().fg(Color::Black).bg(theme::ACCENT).add_modifier(Modifier::BOLD)),
@@ -223,6 +226,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
                 theme::key_hint("R", "refresh all"),
                 theme::key_hint("Enter", "detail"),
                 theme::key_hint("j/k", "move"),
+                theme::key_hint("m", "map"),
                 theme::key_hint("q", "quit"),
             ];
             if app.parcels.home.is_none() {
@@ -246,6 +250,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         Mode::Detail { .. } => hint_line(vec![
             theme::key_hint("j/k", "scroll"),
             theme::key_hint("r", "refresh"),
+            theme::key_hint("m", "map"),
             theme::key_hint("q/Esc", "back"),
         ]),
     };
@@ -376,6 +381,7 @@ mod tests {
     fn detail_mode_lists_events() {
         let mut app = sample_app();
         app.mode = Mode::Detail { scroll: 0 };
+        app.show_map = false; // this test is about the event list, not the map pane
         let out = render(&app, 100, 12);
         assert!(out.contains("Shenzhen"), "{out}");
         assert!(out.contains("Departed facility"), "{out}");
@@ -386,6 +392,7 @@ mod tests {
     fn detail_scroll_past_end_still_shows_last_event() {
         let mut app = sample_app();
         app.mode = Mode::Detail { scroll: 50 };
+        app.show_map = false; // this test is about scrolling the event list, not the map pane
         let out = render(&app, 100, 12);
         assert!(out.contains("Departed facility"), "{out}");
     }
@@ -401,6 +408,7 @@ mod tests {
             t.tracking_url = Some("https://example.test/track".into());
         }
         app.mode = Mode::Detail { scroll: 0 };
+        app.show_map = false; // this test is about the summary card and timeline, not the map pane
         // +3 rows over the other detail tests: the journey strip (task 4) now takes a
         // fixed 3 rows between the card and timeline, and this test's 8-row card plus
         // 2-line event needs the extra room to keep everything visible at once.
@@ -444,6 +452,7 @@ mod tests {
             st.tracking.as_mut().unwrap().events[0].translated = Some("Departed facility".into());
         }
         app.mode = Mode::Detail { scroll: 0 };
+        app.show_map = false; // this test is about the timeline text, not the map pane
         let out = render(&app, 100, 20);
         assert_eq!(out.matches("Departed facility").count(), 1, "should not duplicate the original line:\n{out}");
     }
@@ -584,9 +593,22 @@ mod tests {
 
         let mut app = sample_app();
         app.parcels.home = Some("Roissy CDG".into());
+        app.cache.geo.insert("Roissy CDG".into(), Some((49.0, 2.5)));
         let out = render(&app, 120, 12);
-        assert!(out.contains("⌂ set"), "home configured:\n{out}");
+        assert!(out.contains("⌂ set"), "home geocoded:\n{out}");
         assert!(!out.contains("--home to set your address"), "home is set, no hint needed:\n{out}");
+    }
+
+    #[test]
+    fn header_shows_locating_then_unresolved_for_home_geocode() {
+        let mut app = sample_app();
+        app.parcels.home = Some("Roissy CDG".into());
+        let out = render(&app, 120, 12);
+        assert!(out.contains("⌂ locating…"), "home set, geocode not yet reported:\n{out}");
+
+        app.cache.geo.insert("Roissy CDG".into(), None);
+        let out = render(&app, 120, 12);
+        assert!(out.contains("⌂ unresolved"), "home geocode was a miss:\n{out}");
     }
 
     #[test]
@@ -603,34 +625,48 @@ mod tests {
     fn detail_wide_shows_map_with_home_pin() {
         let mut app = sample_app();
         app.parcels.home = Some("Berlin".into());
-        app.cache.geo.insert("Shenzhen".into(), Some((22.5445741, 114.0545429)));
+        app.cache.geo.insert("shenzhen".into(), Some((22.5445741, 114.0545429))); // lowercased: matches poller::geocode_locations' cache key
         app.cache.geo.insert("Berlin".into(), Some((52.52, 13.405)));
         app.mode = Mode::Detail { scroll: 0 };
         let out = render(&app, 120, 30);
-        assert!(out.contains("map"), "wide detail should show the map pane:\n{out}");
-        assert!(out.contains('⌂'), "map should pin home:\n{out}");
+        assert!(out.contains("╭ map"), "wide detail should show the map pane:\n{out}");
+        assert!(
+            out.contains("⌂ Berlin") || out.contains("Berlin ⌂"),
+            "map should pin home with its label, either orientation:\n{out}"
+        );
+    }
+
+    #[test]
+    fn detail_home_only_strip_shows_waiting_hint() {
+        let mut list = ParcelList::default();
+        list.add("RB123456789CN", None, now());
+        let mut app = App::new(list, StateCache::default(), Duration::from_secs(600));
+        app.parcels.home = Some("Berlin".into());
+        app.mode = Mode::Detail { scroll: 0 };
+        let out = render(&app, 100, 20);
+        assert!(out.contains("waiting for first scan"), "{out}");
     }
 
     #[test]
     fn detail_narrow_hides_map() {
         let mut app = sample_app();
         app.parcels.home = Some("Berlin".into());
-        app.cache.geo.insert("Shenzhen".into(), Some((22.5445741, 114.0545429)));
+        app.cache.geo.insert("shenzhen".into(), Some((22.5445741, 114.0545429))); // lowercased: matches poller::geocode_locations' cache key
         app.cache.geo.insert("Berlin".into(), Some((52.52, 13.405)));
         app.mode = Mode::Detail { scroll: 0 };
         let out = render(&app, 90, 30);
-        assert!(!out.contains("map"), "narrow detail should not show the map pane:\n{out}");
+        assert!(!out.contains("╭ map"), "narrow detail should not show the map pane:\n{out}");
     }
 
     #[test]
     fn detail_map_toggle_off_hides_map() {
         let mut app = sample_app();
         app.parcels.home = Some("Berlin".into());
-        app.cache.geo.insert("Shenzhen".into(), Some((22.5445741, 114.0545429)));
+        app.cache.geo.insert("shenzhen".into(), Some((22.5445741, 114.0545429))); // lowercased: matches poller::geocode_locations' cache key
         app.cache.geo.insert("Berlin".into(), Some((52.52, 13.405)));
         app.mode = Mode::Detail { scroll: 0 };
         app.show_map = false;
         let out = render(&app, 120, 30);
-        assert!(!out.contains("map"), "show_map=false should hide the map pane:\n{out}");
+        assert!(!out.contains("╭ map"), "show_map=false should hide the map pane:\n{out}");
     }
 }

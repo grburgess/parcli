@@ -5,7 +5,6 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
 
-use crate::geo::Coord;
 use crate::poller::{PollCommand, PollEvent, PollResult};
 use crate::store::{Parcel, ParcelList, ParcelState, StateCache};
 
@@ -58,12 +57,6 @@ impl App {
 
     pub fn state_for(&self, number: &str) -> Option<&ParcelState> {
         self.cache.by_number.get(number)
-    }
-
-    /// Not yet drawn anywhere; wired in by the map rendering that consumes `show_map`.
-    #[allow(dead_code)]
-    pub fn home_coord(&self) -> Option<Coord> {
-        self.parcels.home.as_ref().and_then(|h| self.cache.geo.get(h)).copied().flatten()
     }
 
     fn clamp_selection(&mut self) {
@@ -488,6 +481,17 @@ mod tests {
         assert!(app.handle_key(key('m'), now()).is_empty());
         assert!(!app.show_map);
         assert!(matches!(app.mode, Mode::Detail { .. }), "toggling the map does not leave Detail mode");
+
+        app.mode = Mode::Normal;
+        app.show_map = true;
+        app.handle_key(key('a'), now());
+        assert!(matches!(app.mode, Mode::Adding(_)));
+        assert!(app.handle_key(key('m'), now()).is_empty());
+        assert!(app.show_map, "m is text input while adding, not a map toggle");
+        match &app.mode {
+            Mode::Adding(input) => assert_eq!(input.value(), "m"),
+            other => panic!("expected Adding, got {other:?}"),
+        }
     }
 
     #[test]
@@ -502,21 +506,6 @@ mod tests {
         let effects = app.apply_poll_event(PollEvent::Geocoded { key: "Nowhere".into(), coord: None }, now());
         assert_eq!(effects, vec![Effect::SaveState]);
         assert_eq!(app.cache.geo.get("Nowhere"), Some(&None), "a miss is cached too");
-    }
-
-    #[test]
-    fn home_coord_looks_up_home_in_geo_cache() {
-        let mut app = app_with(&[]);
-        assert_eq!(app.home_coord(), None, "no home configured");
-
-        app.parcels.home = Some("Roissy CDG".into());
-        assert_eq!(app.home_coord(), None, "home set but not yet geocoded");
-
-        app.cache.geo.insert("Roissy CDG".into(), Some((49.0, 2.5)));
-        assert_eq!(app.home_coord(), Some((49.0, 2.5)));
-
-        app.cache.geo.insert("Roissy CDG".into(), None);
-        assert_eq!(app.home_coord(), None, "home geocode was a miss");
     }
 
     #[test]

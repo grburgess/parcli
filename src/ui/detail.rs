@@ -29,7 +29,7 @@ pub(super) fn draw_detail(frame: &mut Frame, area: Rect, app: &App, scroll: u16,
     let home = app.parcels.home.as_deref();
     let stops = journey_stops(tracking, home, &app.cache.geo);
 
-    let inner = if app.show_map && inner.width >= 100 {
+    let inner = if app.show_map && area.width >= 100 {
         let [left, right] = Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)]).areas(inner);
         draw_map(frame, right, &stops, sel_status, tick);
         left
