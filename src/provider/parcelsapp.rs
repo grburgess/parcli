@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -44,7 +45,7 @@ struct ApiCarrier {
 /// Parse the body of parcelsapp's `POST /api/v2/parcels` response.
 pub fn parse_response(body: &str, number: &str, fetched_at: DateTime<Utc>) -> Result<Tracking> {
     let api: ApiResponse = serde_json::from_str(body).context("parcelsapp response is not JSON")?;
-    if let Some(msg) = api.error.or(api.message).filter(|m| !m.is_empty()) {
+    if let Some(msg) = api.error.filter(|m| !m.is_empty()).or(api.message.filter(|m| !m.is_empty())) {
         anyhow::bail!("parcelsapp error: {msg}");
     }
 
@@ -157,14 +158,35 @@ impl ParcelsAppProvider {
                 .click().await?;
 
             let mut pending: Vec<String> = Vec::new();
+            // Ids whose loadingFinished event we saw before we knew they were an
+            // API request (see the comment on the select! below).
+            let mut finished_ids: HashSet<String> = HashSet::new();
             let mut body: Option<String> = None;
             let settle = tokio::time::sleep(Duration::from_secs(3600)); // reset once the first body arrives
             tokio::pin!(settle);
             loop {
+                // `biased` polls responseReceived, then loadingFinished, then the
+                // settle timer, in that fixed order every iteration. CDP always
+                // emits responseReceived before loadingFinished for the same
+                // request, but tokio's default `select!` picks a ready branch at
+                // random; if both events are already buffered it could poll
+                // `finished` first, find the id missing from `pending`, and drop
+                // the fetch entirely — stalling the poll to the full timeout.
+                // `finished_ids` closes that gap: a loadingFinished seen ahead of
+                // its responseReceived is remembered and the body is fetched as
+                // soon as the matching responseReceived arrives.
                 tokio::select! {
+                    biased;
                     Some(ev) = responses.next() => {
+                        let id = ev.request_id.inner().clone();
                         if ev.response.url.contains(API_PATH) {
-                            pending.push(ev.request_id.inner().clone());
+                            if finished_ids.remove(&id) {
+                                let got = page.execute(GetResponseBodyParams::new(id)).await?;
+                                body = Some(got.result.body.clone());
+                                settle.as_mut().reset(tokio::time::Instant::now() + SETTLE);
+                            } else {
+                                pending.push(id);
+                            }
                         }
                     }
                     Some(ev) = finished.next() => {
@@ -173,6 +195,8 @@ impl ParcelsAppProvider {
                             let got = page.execute(GetResponseBodyParams::new(id)).await?;
                             body = Some(got.result.body.clone());
                             settle.as_mut().reset(tokio::time::Instant::now() + SETTLE);
+                        } else {
+                            finished_ids.insert(id);
                         }
                     }
                     () = &mut settle => break,
@@ -248,6 +272,12 @@ mod tests {
     fn api_error_field_is_an_error() {
         let err = parse_response(r#"{"error":"Too many requests"}"#, "X", now()).unwrap_err();
         assert!(err.to_string().contains("Too many requests"));
+    }
+
+    #[test]
+    fn empty_error_falls_back_to_message() {
+        let err = parse_response(r#"{"error":"","message":"Rate limited"}"#, "X", now()).unwrap_err();
+        assert!(err.to_string().contains("Rate limited"), "{err}");
     }
 
     #[test]
