@@ -8,6 +8,8 @@ use ratatui::Frame;
 use crate::app::{App, Mode};
 use crate::provider::Status;
 
+pub mod theme;
+
 const SPINNER: [&str; 4] = ["|", "/", "-", "\\"];
 
 pub fn status_color(s: Status) -> Color {
@@ -86,13 +88,20 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc>) {
         .min()
         .map(|t| format!("next poll {}", humanize(t - now)))
         .unwrap_or_else(|| "next poll —".into());
+    let home_span = if app.parcels.home.is_some() {
+        Span::styled("⌂ set", Style::default().fg(Color::Green))
+    } else {
+        Span::styled("⌂ unset", Style::default().fg(theme::DIM))
+    };
     let mut spans = vec![
-        Span::styled(" parcli ", Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::raw(format!(" {} parcels · {}", app.parcels.parcels.len(), next)),
+        Span::styled(" parcli ", Style::default().fg(Color::Black).bg(theme::ACCENT).add_modifier(Modifier::BOLD)),
+        Span::raw(format!(" {} parcels · ", app.parcels.parcels.len())),
+        home_span,
+        Span::raw(format!(" · {next}")),
     ];
     if let Some(err) = &app.last_error {
         spans.push(Span::raw(" · "));
-        spans.push(Span::styled(err.clone(), Style::default().fg(Color::Red)));
+        spans.push(Span::styled(format!(" {err} "), Style::default().fg(Color::Red).bg(theme::ERROR_BG)));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), left);
     let clock = now.with_timezone(&chrono::Local).format("%H:%M:%S").to_string();
@@ -101,17 +110,28 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc>) {
 
 fn draw_table(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc>, spinner_tick: usize) {
     if app.parcels.parcels.is_empty() {
-        let hint = Paragraph::new("no parcels — press a to add a tracking number").dark_gray().centered();
+        let hint = Paragraph::new("no parcels — press a to add a tracking number")
+            .style(Style::default().fg(theme::DIM))
+            .centered();
         frame.render_widget(hint, area);
         return;
     }
-    let block = Block::bordered().border_type(BorderType::Rounded).title(" parcels ");
+    let sel_status = app
+        .selected_parcel()
+        .and_then(|p| app.state_for(&p.number))
+        .and_then(|s| s.tracking.as_ref())
+        .map(|t| t.status)
+        .unwrap_or(Status::Unknown);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .title(Span::styled(" parcels ", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)))
+        .border_style(Style::default().fg(status_color(sel_status)));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     let header = Row::new(["LABEL", "NUMBER", "CARRIER", "STATUS", "LAST EVENT", "AGE", "NEXT"])
-        .style(Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD));
-    let zebra = Style::default().bg(Color::Indexed(235));
+        .style(Style::default().fg(Color::Black).bg(theme::ACCENT).add_modifier(Modifier::BOLD));
+    let zebra = Style::default().bg(theme::ZEBRA);
     let rows = app.parcels.parcels.iter().enumerate().map(|(i, p)| {
         let state = app.state_for(&p.number);
         let tracking = state.and_then(|s| s.tracking.as_ref());
@@ -135,7 +155,7 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc>, spin
         } else if state.and_then(|s| s.last_error.as_ref()).is_some() {
             Cell::from("error").style(Style::default().fg(Color::Red))
         } else {
-            Cell::from("…").style(Style::default().fg(Color::DarkGray))
+            Cell::from("…").style(Style::default().fg(theme::DIM))
         };
 
         let age = latest.and_then(|e| e.time).map(|t| now - t);
@@ -144,10 +164,12 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc>, spin
             None => Cell::from(""),
         };
 
+        let carrier_name = tracking.and_then(|t| t.carrier.clone()).unwrap_or_default();
+        let carrier_fg = if carrier_name.is_empty() { theme::CARRIER } else { theme::carrier_color(&carrier_name) };
         let mut row = Row::new(vec![
-            Cell::from(p.label.clone().unwrap_or_default()).style(Style::default().fg(Color::Cyan)),
-            Cell::from(p.number.clone()).style(Style::default().add_modifier(Modifier::BOLD)),
-            Cell::from(tracking.and_then(|t| t.carrier.clone()).unwrap_or_default()).style(Style::default().fg(Color::Magenta)),
+            Cell::from(p.label.clone().unwrap_or_default()).style(Style::default().fg(theme::ACCENT)),
+            Cell::from(p.number.clone()).style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Cell::from(carrier_name).style(Style::default().fg(carrier_fg)),
             status_cell,
             Cell::from(latest.map(|e| e.display_text().to_string()).unwrap_or_default()),
             age_cell,
@@ -179,20 +201,22 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App, scroll: u16, now: DateT
     let Some(parcel) = app.selected_parcel() else { return };
     let state = app.state_for(&parcel.number);
     let tracking = state.and_then(|s| s.tracking.as_ref());
+    let sel_status = tracking.map(|t| t.status).unwrap_or(Status::Unknown);
+    let border_style = Style::default().fg(status_color(sel_status));
 
     let title = format!(" {} ", parcel.label.as_deref().unwrap_or(&parcel.number));
-    let outer = Block::bordered().border_type(BorderType::Rounded).title(title);
+    let outer = Block::bordered().border_type(BorderType::Rounded).title(title).border_style(border_style);
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
 
-    let key_style = Style::default().fg(Color::DarkGray);
+    let key_style = Style::default().fg(theme::DIM);
 
     let mut rows: Vec<(String, Span<'static>)> = vec![(String::from("Number"), Span::raw(parcel.number.clone()))];
     if let Some(label) = &parcel.label {
         rows.push((String::from("Label"), Span::raw(label.clone())));
     }
     if let Some(carrier) = tracking.and_then(|t| t.carrier.as_deref()) {
-        rows.push((String::from("Carrier"), Span::styled(carrier.to_string(), Style::default().fg(Color::Magenta))));
+        rows.push((String::from("Carrier"), Span::styled(carrier.to_string(), Style::default().fg(theme::carrier_color(carrier)))));
     }
     if let Some(t) = tracking {
         rows.push((String::from("Status"), status_pill(t.status)));
@@ -214,7 +238,7 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App, scroll: u16, now: DateT
         rows.push((String::from("Next poll"), Span::raw(next)));
     }
     if let Some(url) = tracking.and_then(|t| t.tracking_url.as_deref()) {
-        rows.push((String::from("Tracking link"), Span::styled(url.to_string(), Style::default().fg(Color::DarkGray))));
+        rows.push((String::from("Tracking link"), Span::styled(url.to_string(), Style::default().fg(theme::DIM))));
     }
 
     let key_w = rows.iter().map(|(k, _)| k.chars().count()).max().unwrap_or(0);
@@ -227,12 +251,14 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App, scroll: u16, now: DateT
     let card_height = ((card_lines.len() as u16) + 2).min(max_card_height);
     let [card_area, timeline_area] = Layout::vertical([Constraint::Length(card_height), Constraint::Min(3)]).areas(inner);
 
-    let card_block = Block::bordered().border_type(BorderType::Rounded).title(" summary ");
+    let card_block = Block::bordered().border_type(BorderType::Rounded).title(" summary ").border_style(border_style);
     frame.render_widget(Paragraph::new(card_lines).block(card_block), card_area);
 
     let event_count = tracking.map(|t| t.events.len()).unwrap_or(0);
-    let timeline_block =
-        Block::bordered().border_type(BorderType::Rounded).title(format!(" events ({event_count}) "));
+    let timeline_block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .title(format!(" events ({event_count}) "))
+        .border_style(border_style);
 
     match tracking {
         None => {
@@ -259,9 +285,10 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App, scroll: u16, now: DateT
                     let dot = if is_newest {
                         Span::styled("● ", Style::default().fg(status_color(t.status)))
                     } else {
-                        Span::styled("│ ", Style::default().fg(Color::DarkGray))
+                        Span::styled("│ ", Style::default().fg(theme::DIM))
                     };
                     let when = e.time.map(|d| d.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_else(|| "—".repeat(16));
+                    let when_color = e.time.map(|d| age_color(now - d)).unwrap_or(theme::DIM);
                     let loc = e.location.clone().unwrap_or_default();
                     let mut text_style = Style::default();
                     if is_newest {
@@ -269,17 +296,17 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App, scroll: u16, now: DateT
                     }
                     let mut lines = vec![Line::from(vec![
                         dot,
-                        Span::styled(format!("{when}  "), Style::default().fg(Color::DarkGray)),
-                        Span::styled(format!("{loc:<20} "), Style::default().fg(Color::Cyan)),
+                        Span::styled(format!("{when}  "), Style::default().fg(when_color)),
+                        Span::styled(format!("{loc:<20} "), Style::default().fg(theme::ACCENT)),
                         Span::styled(e.display_text().to_string(), text_style),
                     ])];
                     if let Some(translated) = &e.translated {
                         if translated != &e.description {
                             lines.push(Line::from(vec![
-                                Span::styled("│ ", Style::default().fg(Color::DarkGray)),
+                                Span::styled("│ ", Style::default().fg(theme::DIM)),
                                 Span::styled(
                                     e.description.clone(),
-                                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                                    Style::default().fg(theme::DIM).add_modifier(Modifier::ITALIC),
                                 ),
                             ]));
                         }
@@ -292,9 +319,35 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App, scroll: u16, now: DateT
     }
 }
 
+/// Join `key_hint` groups into one line, separated by " · ", with a leading space.
+fn hint_line(hints: Vec<Vec<Span<'static>>>) -> Line<'static> {
+    let mut spans = vec![Span::raw(" ")];
+    for (i, hint) in hints.into_iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" · ", Style::default().fg(theme::DIM)));
+        }
+        spans.extend(hint);
+    }
+    Line::from(spans)
+}
+
 fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     let line = match &app.mode {
-        Mode::Normal => Line::from(" a add · d remove · r refresh · R refresh all · Enter detail · j/k move · q quit ").dark_gray(),
+        Mode::Normal => {
+            let mut hints = vec![
+                theme::key_hint("a", "add"),
+                theme::key_hint("d", "remove"),
+                theme::key_hint("r", "refresh"),
+                theme::key_hint("R", "refresh all"),
+                theme::key_hint("Enter", "detail"),
+                theme::key_hint("j/k", "move"),
+                theme::key_hint("q", "quit"),
+            ];
+            if app.parcels.home.is_none() {
+                hints.push(vec![Span::styled("--home to set your address", Style::default().fg(theme::DIM))]);
+            }
+            hint_line(hints)
+        }
         Mode::Adding(input) => {
             let prompt = " add: ";
             let width = area.width.saturating_sub(prompt.len() as u16 + 1) as usize;
@@ -308,7 +361,11 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
             let number = app.selected_parcel().map(|p| p.number.as_str()).unwrap_or("");
             Line::from(format!(" remove {number}? (y/n) ")).yellow()
         }
-        Mode::Detail { .. } => Line::from(" j/k scroll · r refresh · q/Esc back ").dark_gray(),
+        Mode::Detail { .. } => hint_line(vec![
+            theme::key_hint("j/k", "scroll"),
+            theme::key_hint("r", "refresh"),
+            theme::key_hint("q/Esc", "back"),
+        ]),
     };
     frame.render_widget(Paragraph::new(line), area);
 }
@@ -616,5 +673,34 @@ mod tests {
         colors.sort_by_key(|c| format!("{c:?}"));
         colors.dedup();
         assert_eq!(colors.len(), 6);
+    }
+
+    #[test]
+    fn footer_shows_key_hints() {
+        let app = sample_app();
+        let out = render(&app, 120, 12);
+        assert!(out.contains("a add"), "{out}");
+        assert!(out.contains("d remove"), "{out}");
+        assert!(out.contains("--home to set your address"), "no home set, should hint at --home:\n{out}");
+
+        let mut app = sample_app();
+        app.mode = Mode::Detail { scroll: 0 };
+        let out = render(&app, 100, 12);
+        assert!(out.contains("j/k scroll"), "{out}");
+        assert!(out.contains("q/Esc back"), "{out}");
+    }
+
+    #[test]
+    fn header_shows_home_indicator() {
+        let app = sample_app();
+        let out = render(&app, 120, 12);
+        assert!(out.contains('⌂'), "{out}");
+        assert!(out.contains("⌂ unset"), "no home configured:\n{out}");
+
+        let mut app = sample_app();
+        app.parcels.home = Some("Roissy CDG".into());
+        let out = render(&app, 120, 12);
+        assert!(out.contains("⌂ set"), "home configured:\n{out}");
+        assert!(!out.contains("--home to set your address"), "home is set, no hint needed:\n{out}");
     }
 }
