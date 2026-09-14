@@ -53,10 +53,12 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc>) {
         .parcels
         .parcels
         .iter()
-        .filter_map(|p| app.state_for(&p.number).map(|s| s.next_poll))
+        .filter_map(|p| app.state_for(&p.number))
+        .filter(|s| !matches!(s.tracking.as_ref().map(|t| t.status), Some(Status::Delivered)))
+        .map(|s| s.next_poll)
         .min()
         .map(|t| format!("next poll {}", humanize(t - now)))
-        .unwrap_or_else(|| "next poll now".into());
+        .unwrap_or_else(|| "next poll —".into());
     let mut spans = vec![
         Span::styled(" parcli ", Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)),
         Span::raw(format!(" {} parcels · {}", app.parcels.parcels.len(), next)),
@@ -240,6 +242,31 @@ mod tests {
         assert!(out.contains("1Z999AA10123456784"), "{out}");
         assert!(out.contains("2 parcels"), "{out}");
         assert!(out.contains("a add"), "{out}");
+    }
+
+    #[test]
+    fn header_ignores_delivered_parcels_for_next_poll() {
+        let mut list = ParcelList::default();
+        list.add("RB123456789CN", None, now());
+        let mut cache = StateCache::default();
+        cache.by_number.insert(
+            "RB123456789CN".into(),
+            ParcelState {
+                tracking: Some(Tracking {
+                    number: "RB123456789CN".into(),
+                    carrier: None,
+                    status: Status::Delivered,
+                    events: vec![],
+                    fetched_at: now(),
+                }),
+                last_error: None,
+                failures: 0,
+                next_poll: now() + chrono::Duration::minutes(5),
+            },
+        );
+        let app = App::new(list, cache, Duration::from_secs(600));
+        let out = render(&app, 120, 12);
+        assert!(out.contains("next poll \u{2014}"), "{out}");
     }
 
     #[test]
