@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::geo::GeoCache;
 use crate::provider::Tracking;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -19,6 +20,8 @@ pub struct Parcel {
 pub struct ParcelList {
     #[serde(default)]
     pub parcels: Vec<Parcel>,
+    #[serde(default)]
+    pub home: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,10 +32,12 @@ pub struct ParcelState {
     pub next_poll: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct StateCache {
     #[serde(default)]
     pub by_number: HashMap<String, ParcelState>,
+    #[serde(default)]
+    pub geo: GeoCache,
 }
 
 pub struct Paths {
@@ -226,5 +231,37 @@ mod tests {
         assert_eq!(t.events[0].translated, None);
         assert!(t.attributes.is_empty());
         assert_eq!(t.tracking_url, None);
+        assert!(cache.geo.is_empty());
+    }
+
+    #[test]
+    fn home_round_trips_through_toml_and_defaults_to_none_on_old_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("parcels.toml");
+        let list = ParcelList { home: Some("Roissy CDG".into()), ..Default::default() };
+        list.save(&path).unwrap();
+        assert_eq!(ParcelList::load(&path).unwrap(), list);
+
+        // MVP-era file predating the `home` field.
+        fs::write(&path, "parcels = []\n").unwrap();
+        let loaded = ParcelList::load(&path).unwrap();
+        assert_eq!(loaded.home, None);
+    }
+
+    #[test]
+    fn geo_round_trips_through_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let mut cache = StateCache::default();
+        cache.geo.insert("Shenzhen".into(), Some((22.5, 114.0)));
+        cache.geo.insert("Web Services".into(), None);
+        cache.save(&path).unwrap();
+
+        let text = fs::read_to_string(&path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["geo"]["Shenzhen"], serde_json::json!([22.5, 114.0]));
+        assert_eq!(value["geo"]["Web Services"], serde_json::Value::Null);
+
+        assert_eq!(StateCache::load(&path).unwrap(), cache);
     }
 }

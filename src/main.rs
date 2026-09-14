@@ -1,4 +1,6 @@
 mod app;
+#[allow(dead_code)]
+mod geo;
 mod poller;
 mod provider;
 mod store;
