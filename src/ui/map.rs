@@ -78,7 +78,8 @@ fn label_anchor(lon: f64, x_bounds: [f64; 2], label_len: usize, inner_width: u16
 /// 2x4 dots and a terminal cell is ~1:2 (w:h), so degrees come out square when
 /// `rows = cols * 2 * lat_span / (lon_span * cos(mid_lat)) / 4`, using the block's
 /// inner (border-subtracted) cell counts. `cos(mid_lat)` is clamped to >= 0.2 so
-/// high-latitude boxes don't blow up the height. Clamped to `[3, area.height]`:
+/// high-latitude boxes don't blow up the height. Clamped to `[3, area.height]`
+/// (never panics even when `area.height < 3`: the lower bound wins in that case):
 /// a wide bounding box simply keeps the pane's full height rather than growing it.
 pub fn fit_map_height(area: Rect, x_bounds: [f64; 2], y_bounds: [f64; 2]) -> u16 {
     let cols = area.width.saturating_sub(2) as f64;
@@ -88,13 +89,19 @@ pub fn fit_map_height(area: Rect, x_bounds: [f64; 2], y_bounds: [f64; 2]) -> u16
     let cos_lat = mid_lat_rad.cos().max(0.2);
 
     let rows = cols * 2.0 * lat_span / (lon_span * cos_lat) / 4.0;
-    let height = rows.ceil() as u16 + 2;
-    height.clamp(3, area.height)
+    let rows = rows.ceil().min(f64::from(u16::MAX - 2)) as u16;
+    let height = rows + 2;
+    height.max(3).min(area.height.max(3))
 }
 
 /// Draw the map pane into `area`: a Braille-marker world map on top (sized by
 /// `fit_map_height` to keep degrees roughly square) with a `stops` legend below.
+/// Draws nothing when `area` is too small to hold even a bordered block.
 pub fn draw_map(frame: &mut Frame, area: Rect, stops: &[Stop], status: Status, tick: usize) {
+    if area.height < 3 || area.width < 3 {
+        return;
+    }
+
     let coords: Vec<Coord> = stops.iter().filter_map(|s| s.coord).collect();
     let (x_bounds, y_bounds) = map_bounds(&coords);
     let map_height = fit_map_height(area, x_bounds, y_bounds);
@@ -265,6 +272,15 @@ mod tests {
         let area = Rect::new(0, 0, 10, 3);
         let height = fit_map_height(area, [-180.0, 180.0], [-60.0, 85.0]);
         assert_eq!(height, 3);
+    }
+
+    #[test]
+    fn fit_map_height_tiny_area_does_not_panic() {
+        let area = Rect::new(0, 0, 10, 1);
+        assert_eq!(fit_map_height(area, [-180.0, 180.0], [-60.0, 85.0]), 3);
+
+        let area = Rect::new(0, 0, 0, 0);
+        assert_eq!(fit_map_height(area, [-180.0, 180.0], [-60.0, 85.0]), 3);
     }
 
     #[test]

@@ -648,6 +648,16 @@ mod tests {
     }
 
     #[test]
+    fn detail_map_tiny_pane_does_not_panic() {
+        let mut app = sample_app();
+        app.parcels.home = Some("Berlin".into());
+        app.cache.geo.insert("Berlin".into(), Some((52.52, 13.405)));
+        app.mode = Mode::Detail { scroll: 0 };
+        app.show_map = true;
+        let _ = render(&app, 120, 3);
+    }
+
+    #[test]
     fn detail_home_only_strip_shows_waiting_hint() {
         let mut list = ParcelList::default();
         list.add("RB123456789CN", None, now());
