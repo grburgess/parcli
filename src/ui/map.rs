@@ -1,12 +1,12 @@
 //! The world-map pane: a Braille canvas plotting journey stops (origin, waypoints,
 //! current position, home) with lines between consecutive geocoded stops.
 
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::symbols::Marker;
-use ratatui::text::Span;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::canvas::{Canvas, Line as CanvasLine, Map, MapResolution};
-use ratatui::widgets::{Block, BorderType};
+use ratatui::widgets::{Block, BorderType, Paragraph};
 use ratatui::Frame;
 
 use crate::geo::Coord;
@@ -73,17 +73,39 @@ fn label_anchor(lon: f64, x_bounds: [f64; 2], label_len: usize, inner_width: u16
     (start, true)
 }
 
-/// Draw the map pane into `area`: a Braille-marker world map with lines between
-/// consecutive geocoded stops (in `status_color`) and pins labeled with stop names.
+/// Block height (in cells, including the 2-cell border) that makes `x_bounds` x
+/// `y_bounds` render aspect-correct as Braille inside `area`: Braille cells pack
+/// 2x4 dots and a terminal cell is ~1:2 (w:h), so degrees come out square when
+/// `rows = cols * 2 * lat_span / (lon_span * cos(mid_lat)) / 4`, using the block's
+/// inner (border-subtracted) cell counts. `cos(mid_lat)` is clamped to >= 0.2 so
+/// high-latitude boxes don't blow up the height. Clamped to `[3, area.height]`:
+/// a wide bounding box simply keeps the pane's full height rather than growing it.
+pub fn fit_map_height(area: Rect, x_bounds: [f64; 2], y_bounds: [f64; 2]) -> u16 {
+    let cols = area.width.saturating_sub(2) as f64;
+    let lon_span = (x_bounds[1] - x_bounds[0]).abs().max(f64::EPSILON);
+    let lat_span = (y_bounds[1] - y_bounds[0]).abs().max(f64::EPSILON);
+    let mid_lat_rad = ((y_bounds[0] + y_bounds[1]) / 2.0).to_radians();
+    let cos_lat = mid_lat_rad.cos().max(0.2);
+
+    let rows = cols * 2.0 * lat_span / (lon_span * cos_lat) / 4.0;
+    let height = rows.ceil() as u16 + 2;
+    height.clamp(3, area.height)
+}
+
+/// Draw the map pane into `area`: a Braille-marker world map on top (sized by
+/// `fit_map_height` to keep degrees roughly square) with a `stops` legend below.
 pub fn draw_map(frame: &mut Frame, area: Rect, stops: &[Stop], status: Status, tick: usize) {
+    let coords: Vec<Coord> = stops.iter().filter_map(|s| s.coord).collect();
+    let (x_bounds, y_bounds) = map_bounds(&coords);
+    let map_height = fit_map_height(area, x_bounds, y_bounds);
+    let [map_area, legend_area] = Layout::vertical([Constraint::Length(map_height), Constraint::Min(0)]).areas(area);
+
     let border_style = Style::default().fg(status_color(status));
     let block = Block::bordered().border_type(BorderType::Rounded).title(" map ").border_style(border_style);
 
-    let coords: Vec<Coord> = stops.iter().filter_map(|s| s.coord).collect();
-    let (x_bounds, y_bounds) = map_bounds(&coords);
     let line_color = status_color(status);
-    let stops = stops.to_vec();
-    let inner_width = block_inner_width(area);
+    let canvas_stops = stops.to_vec();
+    let inner_width = block_inner_width(map_area);
 
     let canvas = Canvas::default()
         .block(block)
@@ -100,7 +122,7 @@ pub fn draw_map(frame: &mut Frame, area: Rect, stops: &[Stop], status: Status, t
             }
 
             let mut prev: Option<Coord> = None;
-            for stop in &stops {
+            for stop in &canvas_stops {
                 if let Some((lat, lon)) = stop.coord {
                     if let Some((plat, plon)) = prev {
                         ctx.draw(&CanvasLine { x1: plon, y1: plat, x2: lon, y2: lat, color: line_color });
@@ -110,7 +132,7 @@ pub fn draw_map(frame: &mut Frame, area: Rect, stops: &[Stop], status: Status, t
             }
 
             ctx.layer();
-            for stop in &stops {
+            for stop in &canvas_stops {
                 let Some((lat, lon)) = stop.coord else { continue };
                 let (glyph, color) = pin_style(stop.kind, status, tick);
                 let name = truncate_name(&stop.name, 12);
@@ -121,7 +143,44 @@ pub fn draw_map(frame: &mut Frame, area: Rect, stops: &[Stop], status: Status, t
             }
         });
 
-    frame.render_widget(canvas, area);
+    frame.render_widget(canvas, map_area);
+
+    if legend_area.height >= 3 {
+        draw_stops_legend(frame, legend_area, stops, status);
+    }
+}
+
+/// Draw the `stops` legend below the map: one line per stop with its coord (or
+/// `(not located)` in `DIM` when it hasn't geocoded yet), colored like its pin.
+/// When nothing has geocoded, shows a hint instead, plus a `--home` nudge if no
+/// `Home` stop is present.
+fn draw_stops_legend(frame: &mut Frame, area: Rect, stops: &[Stop], status: Status) {
+    let border_style = Style::default().fg(status_color(status));
+    let block = Block::bordered().border_type(BorderType::Rounded).title(" stops ").border_style(border_style);
+
+    let lines: Vec<Line> = if stops.iter().all(|s| s.coord.is_none()) {
+        let mut lines = vec![Line::from(Span::styled("no geocoded locations yet", Style::default().fg(theme::DIM)))];
+        if !stops.iter().any(|s| s.kind == StopKind::Home) {
+            lines.push(Line::from(Span::styled("set --home to show your destination", Style::default().fg(theme::WARN))));
+        }
+        lines
+    } else {
+        stops
+            .iter()
+            .map(|stop| {
+                // tick=0: legend always shows Current's steady glyph (`◉`), never the blink.
+                let (glyph, color) = pin_style(stop.kind, status, 0);
+                match stop.coord {
+                    Some((lat, lon)) => {
+                        Line::from(Span::styled(format!("{glyph} {}  {lat:.2}, {lon:.2}", stop.name), Style::default().fg(color)))
+                    }
+                    None => Line::from(Span::styled(format!("{glyph} {}  (not located)", stop.name), Style::default().fg(theme::DIM))),
+                }
+            })
+            .collect()
+    };
+
+    frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 /// Width (in cells) of the canvas's paintable area once its border is subtracted.
@@ -178,6 +237,34 @@ mod tests {
         // Other kinds are unaffected by status.
         let (_, origin_color) = pin_style(StopKind::Origin, Status::Exception, 0);
         assert_eq!(origin_color, theme::ACCENT);
+    }
+
+    #[test]
+    fn fit_map_height_world_in_tall_pane() {
+        let area = Rect::new(0, 0, 50, 80);
+        let height = fit_map_height(area, [-180.0, 180.0], [-60.0, 85.0]);
+        assert_eq!(height, 12, "48*2*145/(360*cos(12.5deg))/4 ~= 9.9 -> 10 rows + 2 border");
+    }
+
+    #[test]
+    fn fit_map_height_zoomed_box_at_high_latitude() {
+        let area = Rect::new(0, 0, 50, 80);
+        let height = fit_map_height(area, [8.0, 18.0], [49.5, 55.5]);
+        assert_eq!(height, 26, "48*2*6/(10*cos(52.5deg))/4 ~= 23.65 -> 24 rows + 2 border");
+    }
+
+    #[test]
+    fn fit_map_height_never_exceeds_area() {
+        let area = Rect::new(0, 0, 200, 10);
+        let height = fit_map_height(area, [8.0, 18.0], [49.5, 55.5]);
+        assert_eq!(height, 10, "computed rows exceed the pane, so it keeps the full height");
+    }
+
+    #[test]
+    fn fit_map_height_minimum_three() {
+        let area = Rect::new(0, 0, 10, 3);
+        let height = fit_map_height(area, [-180.0, 180.0], [-60.0, 85.0]);
+        assert_eq!(height, 3);
     }
 
     #[test]

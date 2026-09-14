@@ -634,6 +634,17 @@ mod tests {
             out.contains("⌂ Berlin") || out.contains("Berlin ⌂"),
             "map should pin home with its label, either orientation:\n{out}"
         );
+        assert!(out.contains("╭ stops"), "map pane should show a stops legend below the map:\n{out}");
+        assert!(out.contains("Berlin") && out.contains("52.5"), "legend should list Berlin with its coord:\n{out}");
+    }
+
+    #[test]
+    fn detail_map_legend_hints_when_nothing_geocoded() {
+        let mut app = sample_app();
+        app.mode = Mode::Detail { scroll: 0 };
+        let out = render(&app, 120, 30);
+        assert!(out.contains("no geocoded locations yet"), "{out}");
+        assert!(out.contains("set --home"), "{out}");
     }
 
     #[test]
