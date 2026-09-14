@@ -2,7 +2,7 @@
 //! current position, home) with lines between consecutive geocoded stops.
 
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Color, Style};
 use ratatui::symbols::Marker;
 use ratatui::text::Span;
 use ratatui::widgets::canvas::{Canvas, Line as CanvasLine, Map, MapResolution};
@@ -10,7 +10,7 @@ use ratatui::widgets::{Block, BorderType};
 use ratatui::Frame;
 
 use crate::geo::Coord;
-use crate::journey::{Stop, StopKind};
+use crate::journey::{truncate_name, Stop, StopKind};
 use crate::provider::Status;
 
 use super::{status_color, theme};
@@ -43,16 +43,34 @@ pub fn map_bounds(coords: &[Coord]) -> ([f64; 2], [f64; 2]) {
     (x, y)
 }
 
-fn pin_glyph(kind: StopKind, tick: usize) -> (&'static str, ratatui::style::Color) {
+/// Glyph and color for a stop's pin. `Current` is colored by `status_color`
+/// (e.g. red for an `Exception`); the others are fixed regardless of status.
+fn pin_style(kind: StopKind, status: Status, tick: usize) -> (&'static str, Color) {
     match kind {
         StopKind::Origin => ("●", theme::ACCENT),
         StopKind::Waypoint => ("•", theme::DIM),
         StopKind::Current => {
             let glyph = if tick % 2 == 0 { "◉" } else { "○" };
-            (glyph, theme::ACCENT)
+            (glyph, status_color(status))
         }
-        StopKind::Home => ("⌂", ratatui::style::Color::Green),
+        StopKind::Home => ("⌂", Color::Green),
     }
+}
+
+/// Where a pin's label should start (in longitude) and whether it is
+/// left-anchored (drawn ending at `lon` rather than starting there). Pins in
+/// the eastern half of `x_bounds` flip so their label doesn't clip against
+/// the canvas's right edge.
+fn label_anchor(lon: f64, x_bounds: [f64; 2], label_len: usize, inner_width: u16) -> (f64, bool) {
+    let span = (x_bounds[1] - x_bounds[0]).max(f64::EPSILON);
+    let frac = (lon - x_bounds[0]) / span;
+    let flipped = frac > 0.5;
+    if !flipped {
+        return (lon, false);
+    }
+    let cells_per_lon = (inner_width as f64 / span).max(f64::EPSILON);
+    let start = lon - (label_len.saturating_sub(1)) as f64 / cells_per_lon;
+    (start, true)
 }
 
 /// Draw the map pane into `area`: a Braille-marker world map with lines between
@@ -65,6 +83,7 @@ pub fn draw_map(frame: &mut Frame, area: Rect, stops: &[Stop], status: Status, t
     let (x_bounds, y_bounds) = map_bounds(&coords);
     let line_color = status_color(status);
     let stops = stops.to_vec();
+    let inner_width = block_inner_width(area);
 
     let canvas = Canvas::default()
         .block(block)
@@ -93,24 +112,21 @@ pub fn draw_map(frame: &mut Frame, area: Rect, stops: &[Stop], status: Status, t
             ctx.layer();
             for stop in &stops {
                 let Some((lat, lon)) = stop.coord else { continue };
-                let (glyph, color) = pin_glyph(stop.kind, tick);
-                let name = truncate(&stop.name, 12);
-                ctx.print(lon, lat, Span::styled(format!("{glyph} {name}"), Style::default().fg(color)));
+                let (glyph, color) = pin_style(stop.kind, status, tick);
+                let name = truncate_name(&stop.name, 12);
+                let label_len = name.chars().count() + 1 + glyph.chars().count();
+                let (start_lon, flipped) = label_anchor(lon, x_bounds, label_len, inner_width);
+                let text = if flipped { format!("{name} {glyph}") } else { format!("{glyph} {name}") };
+                ctx.print(start_lon, lat, Span::styled(text, Style::default().fg(color)));
             }
         });
 
     frame.render_widget(canvas, area);
 }
 
-/// Truncate `name` to at most `max_len` chars, appending `…` when cut.
-fn truncate(name: &str, max_len: usize) -> String {
-    if name.chars().count() <= max_len {
-        return name.to_string();
-    }
-    let keep = max_len.saturating_sub(1).max(1);
-    let mut out: String = name.chars().take(keep).collect();
-    out.push('…');
-    out
+/// Width (in cells) of the canvas's paintable area once its border is subtracted.
+fn block_inner_width(area: Rect) -> u16 {
+    Block::bordered().border_type(BorderType::Rounded).inner(area).width
 }
 
 #[cfg(test)]
@@ -151,5 +167,27 @@ mod tests {
         let (x, y) = map_bounds(&[(-89.9, -179.9)]);
         assert!(x[0] >= -180.0, "{x:?}");
         assert_eq!(y[0], -90.0, "south pole should clamp to -90");
+    }
+
+    #[test]
+    fn pin_style_colors_current_by_status() {
+        let (_, color) = pin_style(StopKind::Current, Status::Exception, 0);
+        assert_eq!(color, status_color(Status::Exception));
+        assert_eq!(color, Color::Red);
+
+        // Other kinds are unaffected by status.
+        let (_, origin_color) = pin_style(StopKind::Origin, Status::Exception, 0);
+        assert_eq!(origin_color, theme::ACCENT);
+    }
+
+    #[test]
+    fn map_label_flips_left_for_eastern_pins() {
+        let bounds = [-180.0, 180.0];
+        let (_, flipped_east) = label_anchor(-180.0 + 0.8 * 360.0, bounds, 10, 100);
+        assert!(flipped_east, "a pin at 80% of the range should flip its label left");
+
+        let (start_west, flipped_west) = label_anchor(-180.0 + 0.2 * 360.0, bounds, 10, 100);
+        assert!(!flipped_west, "a pin at 20% of the range should not flip");
+        assert_eq!(start_west, -180.0 + 0.2 * 360.0, "unflipped label starts at the pin");
     }
 }

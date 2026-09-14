@@ -89,7 +89,7 @@ fn sub_label(kind: StopKind) -> &'static str {
 }
 
 /// Truncate `name` to at most `max_len` chars, appending `…` when cut.
-fn truncate_name(name: &str, max_len: usize) -> String {
+pub(crate) fn truncate_name(name: &str, max_len: usize) -> String {
     if name.chars().count() <= max_len {
         return name.to_string();
     }
