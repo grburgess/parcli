@@ -157,8 +157,7 @@ All handlers are pure functions on `App` returning `Vec<Effect>` (`SaveParcels`,
 
 - Provider errors are per-parcel; they go into `ParcelState.last_error` and the
   header, and trigger backoff. The loop never exits on provider errors.
-- Browser crash: poller attempts one relaunch; if that fails, header shows a
-  persistent error and polling stops until `R`.
+- Browser crash: not auto-relaunched in the MVP; a dead browser surfaces as per-parcel errors with exponential backoff, and `R` retries. Default per-poll timeout is 90 s because parcelsapp performs live carrier lookups (5–60 s observed).
 - Terminal is always restored (panic hook + Drop guard).
 
 ## Testing
@@ -180,3 +179,12 @@ All handlers are pure functions on `App` returning `Vec<Effect>` (`SaveParcels`,
 - `parcli` launches, shows an empty table; `a` + a real tracking number results
   in a populated, colored row within a minute; `Enter` shows events; `d y`
   removes it; restart shows the list and cached state instantly.
+
+## Follow-up 2026-09-14 — translation and visual pass
+
+- MyMemory translation in the poller with per-description cache persisted via `TrackEvent.translated` in `state.json`.
+- `--no-translate` flag disables translation for raw carrier text display.
+- `Tracking.attributes` and `tracking_url` parsed from the widget response and stored for future use.
+- Table: rounded block, Black-on-Cyan header, status pill, staleness-colored AGE (green → yellow → red), `▰▱` poll progress bar in NEXT column, zebra rows, header clock.
+- Detail: summary card with aligned keys + `●`/`│` event timeline with original text beneath translations.
+- parcelsapp keys on the `HeadlessChrome` UA, so the provider overrides the UA.

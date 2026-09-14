@@ -2,7 +2,7 @@
 
 A `top`-like terminal dashboard for international parcel tracking. It drives the
 free [parcelsapp.com](https://parcelsapp.com) widget in headless Chrome, so no
-API key is needed.
+API key is needed. Status is shown as a colored pill, event age fades green → yellow → red as it gets stale, the NEXT column shows a progress bar toward the next poll, and the detail view (Enter) shows a summary card and an event timeline.
 
 ## Requirements
 
@@ -17,6 +17,7 @@ API key is needed.
     parcli                 # poll every 10 minutes
     parcli --interval 30   # poll every 30 minutes
     parcli --timeout 120   # seconds to wait for parcelsapp per poll (default 90)
+    parcli --no-translate  # show carrier text as-is (no English translation)
 
 | Key | Action |
 |---|---|
@@ -30,6 +31,10 @@ API key is needed.
 
 Delivered parcels stop being polled. Failed polls back off exponentially up to
 an hour.
+
+## Translation
+
+Carrier messages that are not in English are translated to English with the free, anonymous [MyMemory](https://mymemory.translated.net) API (roughly 5,000 characters per day). Each distinct message is translated once and cached in `state.json`, so polling costs nothing extra afterwards. The table shows the English text; the detail view shows the original beneath it. Use `--no-translate` to turn this off.
 
 ## Files
 
