@@ -193,6 +193,8 @@ mod tests {
                     status: Status::InTransit,
                     events: vec![],
                     fetched_at: now(),
+                    attributes: vec![],
+                    tracking_url: None,
                 }),
                 last_error: None,
                 failures: 0,
@@ -210,5 +212,19 @@ mod tests {
         fs::write(&path, "this = [not valid").unwrap();
         let err = ParcelList::load(&path).unwrap_err().to_string();
         assert!(err.contains("parcels.toml"), "{err}");
+    }
+
+    #[test]
+    fn loads_mvp_era_state_without_new_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        fs::write(&path, r#"{"by_number":{"A":{"tracking":{"number":"A","carrier":null,"status":"InTransit",
+            "events":[{"time":null,"description":"x","location":null}],"fetched_at":"2026-09-13T12:00:00Z"},
+            "last_error":null,"failures":0,"next_poll":"2026-09-13T12:10:00Z"}}}"#).unwrap();
+        let cache = StateCache::load(&path).unwrap();
+        let t = cache.by_number["A"].tracking.as_ref().unwrap();
+        assert_eq!(t.events[0].translated, None);
+        assert!(t.attributes.is_empty());
+        assert_eq!(t.tracking_url, None);
     }
 }

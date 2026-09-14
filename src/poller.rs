@@ -231,8 +231,10 @@ mod tests {
                 number: number.to_owned(),
                 carrier: None,
                 status: Status::InTransit,
-                events: vec![TrackEvent { time: None, description: "moving".into(), location: None }],
+                events: vec![TrackEvent { time: None, description: "moving".into(), location: None, translated: None }],
                 fetched_at: Utc::now(),
+                attributes: vec![],
+                tracking_url: None,
             })
         }
     }

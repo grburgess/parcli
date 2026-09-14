@@ -404,8 +404,10 @@ mod tests {
             number: "A".into(),
             carrier: Some("DHL".into()),
             status: Status::InTransit,
-            events: vec![TrackEvent { time: Some(now()), description: "Posted".into(), location: None }],
+            events: vec![TrackEvent { time: Some(now()), description: "Posted".into(), location: None, translated: None }],
             fetched_at: now(),
+            attributes: vec![],
+            tracking_url: None,
         };
         let effects = app.apply_poll_event(PollEvent::Finished(PollResult { number: "A".into(), result: Ok(tracking.clone()) }), now());
         assert_eq!(effects, vec![Effect::SaveState]);
@@ -420,7 +422,7 @@ mod tests {
     #[test]
     fn poll_failure_keeps_old_tracking_and_records_error() {
         let mut app = app_with(&["A"]);
-        let tracking = Tracking { number: "A".into(), carrier: None, status: Status::Pending, events: vec![], fetched_at: now() };
+        let tracking = Tracking { number: "A".into(), carrier: None, status: Status::Pending, events: vec![], fetched_at: now(), attributes: vec![], tracking_url: None };
         app.apply_poll_event(PollEvent::Finished(PollResult { number: "A".into(), result: Ok(tracking.clone()) }), now());
         app.apply_poll_event(PollEvent::Finished(PollResult { number: "A".into(), result: Err("boom".into()) }), now());
         let st = app.state_for("A").unwrap();
@@ -446,7 +448,7 @@ mod tests {
         let effects = app.apply_poll_event(PollEvent::Started("A".into()), now());
         assert!(effects.is_empty());
         assert_eq!(app.polling.as_deref(), Some("A"));
-        let tracking = Tracking { number: "A".into(), carrier: None, status: Status::Pending, events: vec![], fetched_at: now() };
+        let tracking = Tracking { number: "A".into(), carrier: None, status: Status::Pending, events: vec![], fetched_at: now(), attributes: vec![], tracking_url: None };
         app.apply_poll_event(PollEvent::Finished(PollResult { number: "A".into(), result: Ok(tracking) }), now());
         assert!(app.polling.is_none());
     }

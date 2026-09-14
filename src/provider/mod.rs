@@ -17,6 +17,17 @@ pub struct TrackEvent {
     pub time: Option<DateTime<Utc>>,
     pub description: String,
     pub location: Option<String>,
+    /// English rendering of `description` when the source was not English.
+    #[serde(default)]
+    pub translated: Option<String>,
+}
+
+impl TrackEvent {
+    // Consumed by the UI rendering added in a later polish task.
+    #[allow(dead_code)]
+    pub fn display_text(&self) -> &str {
+        self.translated.as_deref().unwrap_or(&self.description)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,6 +37,12 @@ pub struct Tracking {
     pub status: Status,
     pub events: Vec<TrackEvent>,
     pub fetched_at: DateTime<Utc>,
+    /// Name/value pairs the site reports, e.g. ("Days in transit", "2").
+    #[serde(default)]
+    pub attributes: Vec<(String, String)>,
+    /// Carrier's own tracking page, if the site provides one.
+    #[serde(default)]
+    pub tracking_url: Option<String>,
 }
 
 #[async_trait]
@@ -112,5 +129,13 @@ mod tests {
     fn labels() {
         assert_eq!(Status::OutForDelivery.label(), "out for delivery");
         assert_eq!(Status::InTransit.label(), "in transit");
+    }
+
+    #[test]
+    fn display_text_prefers_translation() {
+        let mut e = TrackEvent { time: None, description: "Colis".into(), location: None, translated: None };
+        assert_eq!(e.display_text(), "Colis");
+        e.translated = Some("Parcel".into());
+        assert_eq!(e.display_text(), "Parcel");
     }
 }

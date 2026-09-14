@@ -26,6 +26,21 @@ struct ApiResponse {
     status: String,
     error: Option<String>,
     message: Option<String>,
+    #[serde(default)]
+    attributes: Vec<ApiAttribute>,
+    #[serde(rename = "externalTracking", default)]
+    external_tracking: Vec<ApiExternal>,
+}
+
+#[derive(Deserialize)]
+struct ApiAttribute {
+    n: Option<String>,
+    val: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ApiExternal {
+    url: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -64,6 +79,7 @@ pub fn parse_response(body: &str, number: &str, fetched_at: DateTime<Utc>) -> Re
                     time,
                     description: s.status.trim().to_owned(),
                     location: s.location.clone().filter(|l| !l.trim().is_empty()),
+                    translated: None,
                 },
             )
         })
@@ -79,12 +95,17 @@ pub fn parse_response(body: &str, number: &str, fetched_at: DateTime<Utc>) -> Re
     let latest = events.first().map(|(_, e)| e.description.as_str());
     let status = classify_status(&api.status, latest);
 
+    let attributes = api.attributes.iter().filter_map(|a| Some((a.n.clone()?, a.val.clone()?))).collect();
+    let tracking_url = api.external_tracking.iter().find_map(|e| e.url.clone());
+
     Ok(Tracking {
         number: number.to_owned(),
         carrier,
         status,
         events: events.into_iter().map(|(_, e)| e).collect(),
         fetched_at,
+        attributes,
+        tracking_url,
     })
 }
 
@@ -244,6 +265,18 @@ mod tests {
         assert_eq!(t.events[0].time, Some(Utc.with_ymd_and_hms(2026, 4, 14, 9, 58, 50).unwrap()));
         assert_eq!(t.events[0].location, None);
         assert_eq!(t.fetched_at, now());
+        assert!(t.attributes.is_empty());
+        assert_eq!(t.tracking_url.as_deref(), Some("https://global.cainiao.com/detail.htm?mailNoList=RB123456789CN"));
+    }
+
+    #[test]
+    fn parses_attributes_and_tracking_url() {
+        let body = r#"{"states":[],"carriers":[],"attributes":[{"l":"days_transit","n":"Days in transit","val":"2"}],
+            "externalTracking":[{"url":"https://example.test/x","slug":"x","method":"GET"}]}"#;
+        let t = parse_response(body, "X", now()).unwrap();
+        assert_eq!(t.attributes, vec![("Days in transit".to_string(), "2".to_string())]);
+        assert_eq!(t.tracking_url.as_deref(), Some("https://example.test/x"));
+        assert!(t.events.is_empty());
     }
 
     #[test]
