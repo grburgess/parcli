@@ -50,6 +50,11 @@ impl Geocoder for NominatimGeocoder {
             query_params.push(("featureType", "settlement"));
         }
 
+        // Stamped before sending, not after, so a request that times out still
+        // counts toward the spacing between requests.
+        *last_request = Some(Instant::now());
+        drop(last_request);
+
         let body = self
             .client
             .get(ENDPOINT)
@@ -60,9 +65,6 @@ impl Geocoder for NominatimGeocoder {
             .text()
             .await
             .context("reading geocoding response")?;
-
-        *last_request = Some(Instant::now());
-        drop(last_request);
 
         parse_nominatim(&body)
     }

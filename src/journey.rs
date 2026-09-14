@@ -42,10 +42,11 @@ pub fn journey_stops(tracking: Option<&Tracking>, home: Option<&str>, geo: &GeoC
             if normalized.is_empty() {
                 continue;
             }
-            if !seen.insert(normalized.to_lowercase()) {
+            let key = normalized.to_lowercase();
+            if !seen.insert(key.clone()) {
                 continue;
             }
-            let coord = geo.get(&normalized).cloned().flatten();
+            let coord = geo.get(&key).cloned().flatten();
             let kind = if stops.is_empty() { StopKind::Origin } else { StopKind::Waypoint };
             stops.push(Stop { name: normalized, coord, kind });
         }

@@ -51,7 +51,7 @@ async fn main() -> Result<()> {
     let cache = StateCache::load(&paths.state)?;
 
     if let Some(home) = args.home {
-        parcels.home = Some(home);
+        parcels.home = if home.trim().is_empty() { None } else { Some(home) };
         parcels.save(&paths.parcels)?;
     }
 
