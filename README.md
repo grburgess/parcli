@@ -2,7 +2,32 @@
 
 A `top`-like terminal dashboard for international parcel tracking. It drives the
 free [parcelsapp.com](https://parcelsapp.com) widget in headless Chrome, so no
-API key is needed. Status is shown as a colored pill, event age fades green → yellow → red as it gets stale, the NEXT column shows a progress bar toward the next poll, and the detail view (Enter) shows a summary card and an event timeline.
+API key is needed.
+
+```
+ parcli  2 parcels · ⌂ set · next poll 7m                                          14:00:00
+╭ parcels ──────────────────────────────────────────────────────────────────────────────────╮
+│LABEL      NUMBER            CARRIER          STATUS        LAST EVENT           AGE  NEXT   │
+│camera     RB123456789CN     China Post        in transit   Left the facility    5h   ▰▱▱▱▱ 7m│
+│           XT336054383TS     Chronopost France pending      Packages being prep… 1h   ▰▰▱▱▱ 6m│
+╰────────────────────────────────────────────────────────────────────────────────────────────╯
+ a add · d remove · r refresh · R refresh all · Enter detail · m map · j/k move · q quit
+```
+
+## Features
+
+- Add and remove tracking numbers from the keyboard; the list and last-known
+  results persist across restarts.
+- Sequential polling with per-parcel exponential backoff; delivered parcels stop
+  polling. Status pills, staleness-colored event age, and a progress bar toward
+  the next poll.
+- Detail view: summary card, animated origin → home journey strip, event
+  timeline, and a Braille world map with origin / waypoint / current / home pins.
+- Carrier messages translated to English (MyMemory), locations geocoded
+  (OpenStreetMap Nominatim) — both free, keyless, and cached.
+
+This is a personal tool that automates a public website; it is not affiliated
+with parcelsapp.com and may break if the site changes.
 
 ## Requirements
 
