@@ -187,38 +187,35 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App, scroll: u16, now: DateT
 
     let key_style = Style::default().fg(Color::DarkGray);
 
-    let mut card_lines: Vec<Line> = vec![
-        Line::from(vec![Span::styled("Number       ", key_style), Span::raw(parcel.number.clone())]),
-    ];
+    let mut rows: Vec<(String, Span<'static>)> = vec![(String::from("Number"), Span::raw(parcel.number.clone()))];
     if let Some(label) = &parcel.label {
-        card_lines.push(Line::from(vec![Span::styled("Label        ", key_style), Span::raw(label.clone())]));
+        rows.push((String::from("Label"), Span::raw(label.clone())));
     }
     if let Some(carrier) = tracking.and_then(|t| t.carrier.as_deref()) {
-        card_lines.push(Line::from(vec![
-            Span::styled("Carrier      ", key_style),
-            Span::styled(carrier.to_string(), Style::default().fg(Color::Magenta)),
-        ]));
+        rows.push((String::from("Carrier"), Span::styled(carrier.to_string(), Style::default().fg(Color::Magenta))));
     }
     if let Some(t) = tracking {
-        card_lines.push(Line::from(vec![Span::styled("Status       ", key_style), status_pill(t.status)]));
+        rows.push((String::from("Status"), status_pill(t.status)));
         for (name, value) in &t.attributes {
-            card_lines.push(Line::from(vec![Span::styled(format!("{name}  "), key_style), Span::raw(value.clone())]));
+            rows.push((name.clone(), Span::raw(value.clone())));
         }
-        card_lines.push(Line::from(vec![
-            Span::styled("Last update  ", key_style),
-            Span::raw(format!("{} ago", humanize(now - t.fetched_at))),
-        ]));
+        let age = humanize(now - t.fetched_at);
+        let last_update = if age == "now" { "just now".to_string() } else { format!("{age} ago") };
+        rows.push((String::from("Last update"), Span::raw(last_update)));
     }
     if let Some(s) = state {
         let next = if s.next_poll <= now { "done".to_string() } else { humanize(s.next_poll - now) };
-        card_lines.push(Line::from(vec![Span::styled("Next poll    ", key_style), Span::raw(next)]));
+        rows.push((String::from("Next poll"), Span::raw(next)));
     }
     if let Some(url) = tracking.and_then(|t| t.tracking_url.as_deref()) {
-        card_lines.push(Line::from(vec![
-            Span::styled("Tracking link  ", key_style),
-            Span::styled(url.to_string(), Style::default().fg(Color::DarkGray)),
-        ]));
+        rows.push((String::from("Tracking link"), Span::styled(url.to_string(), Style::default().fg(Color::DarkGray))));
     }
+
+    let key_w = rows.iter().map(|(k, _)| k.chars().count()).max().unwrap_or(0);
+    let card_lines: Vec<Line> = rows
+        .into_iter()
+        .map(|(k, v)| Line::from(vec![Span::styled(format!("{k:<key_w$}  "), key_style), v]))
+        .collect();
 
     let max_card_height = inner.height.saturating_sub(4).max(3);
     let card_height = ((card_lines.len() as u16) + 2).min(max_card_height);
@@ -478,6 +475,15 @@ mod tests {
         ] {
             assert!(out.contains(needle), "missing {needle:?} in:\n{out}");
         }
+
+        // Value column must line up: every key is padded to the width of the longest key
+        // present, so "Number" and "Days in transit" values start at the same column.
+        let keys = ["Number", "Label", "Carrier", "Status", "Days in transit", "Last update", "Next poll", "Tracking link"];
+        let key_w = keys.iter().map(|k| k.chars().count()).max().unwrap();
+        let expected_number = format!("{:<key_w$}  {}", "Number", "RB123456789CN");
+        let expected_attr = format!("{:<key_w$}  {}", "Days in transit", "2");
+        assert!(out.contains(&expected_number), "keys not aligned, missing {expected_number:?} in:\n{out}");
+        assert!(out.contains(&expected_attr), "keys not aligned, missing {expected_attr:?} in:\n{out}");
     }
 
     #[test]
