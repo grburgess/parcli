@@ -2,6 +2,8 @@ mod app;
 mod poller;
 mod provider;
 mod store;
+#[allow(dead_code)]
+mod translate;
 mod tui;
 mod ui;
 
