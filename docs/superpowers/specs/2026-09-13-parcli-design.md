@@ -188,3 +188,12 @@ All handlers are pure functions on `App` returning `Vec<Effect>` (`SaveParcels`,
 - Table: rounded block, Black-on-Cyan header, status pill, staleness-colored AGE (green → yellow → red), `▰▱` poll progress bar in NEXT column, zebra rows, header clock.
 - Detail: summary card with aligned keys + `●`/`│` event timeline with original text beneath translations.
 - parcelsapp keys on the `HeadlessChrome` UA, so the provider overrides the UA.
+
+## Follow-up 2026-09-14 (2) — palette, journey strip, map
+
+- `ui::theme` palette defines colors for statuses and carrier badges; FNV-based per-carrier hash generates consistent badge colors; key hints in footer tinted by mode and action urgency.
+- `journey` module: `journey_stops` extracts origin, waypoints, current, and home from `TrackEvent` locations; `render_strip` formats the visual journey line (● ━━ waypoints ━━ ◉ current ┄┄ ○ home); pulse animates on the 250 ms render tick toward home; Delivered status shows ✔ and freezes the pulse.
+- Map pane: `Canvas` widget renders a built-in world `Map`, bounding box padded 15% with a 10° minimum in each dimension for small regions; pins use ● (origin) • (waypoint) ◉ (current) ○ (home) ⌂ (exact home) semantics; eastern hemisphere labels flip to left-align; `m` key toggles visibility, width ≥ 100 columns enables the pane in detail view.
+- Geocoding via OpenStreetMap Nominatim: `featureType=settlement` for event locations, full address for home; ≥1.1 s throttle between requests; cache hits per place (looked up once); misses cached as `null` in `StateCache.geo` to avoid repeated failed lookups.
+- `PollEvent::Geocoded { number, location, geo_result }` enqueues geocoding work in the poller.
+- `ParcelList.home: Option<String>` persisted in `parcels.toml`; `--home <ADDRESS>` sets it; saved on `a` or `--home` command.

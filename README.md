@@ -18,6 +18,7 @@ API key is needed. Status is shown as a colored pill, event age fades green → 
     parcli --interval 30   # poll every 30 minutes
     parcli --timeout 120   # seconds to wait for parcelsapp per poll (default 90)
     parcli --no-translate  # show carrier text as-is (no English translation)
+    parcli --home "Musterstraße 1, 10115 Berlin"   # save your address (map + journey destination)
 
 | Key | Action |
 |---|---|
@@ -25,6 +26,7 @@ API key is needed. Status is shown as a colored pill, event age fades green → 
 | `d` | remove the selected parcel (confirms with `y`/`n`) |
 | `r` / `R` | refresh selected / all |
 | `Enter` | show event history; `q`/`Esc` to go back |
+| `m` | toggle the map pane (detail view) |
 | `j`/`k`, arrows | move |
 | `q` | quit |
 | `Ctrl-C` | quit |
@@ -35,6 +37,14 @@ an hour.
 ## Translation
 
 Carrier messages that are not in English are translated to English with the free, anonymous [MyMemory](https://mymemory.translated.net) API (roughly 5,000 characters per day). Each distinct message is looked up once (whether or not it needed translating) and the result is cached in `state.json`, so later polls and restarts cost nothing. The table shows the English text; the detail view shows the original beneath it. Use `--no-translate` to turn this off.
+
+## Journey and map
+
+The detail view (Enter) shows a journey strip — origin ● ━━ waypoints ━━ ◉ current ┄┄ ○ home — with a pulse moving toward home, and (in terminals ≥ 100 columns) a world map with the same pins. Locations come from the carrier's scan events; set your address once with `--home` so the destination pin appears. Press `m` to hide or show the map.
+
+## Privacy
+
+parcli talks to three services: parcelsapp.com (the tracking number, via a headless browser), MyMemory (event text, for translation) and OpenStreetMap Nominatim (place names from scan events and your home address, for the map; at most one request per second, each place looked up once and cached in `state.json`). Nothing else leaves your machine. Use `--no-translate` to skip MyMemory.
 
 ## Files
 
