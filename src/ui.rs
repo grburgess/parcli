@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, List, ListItem, Paragraph, Row, Table, TableState};
+use ratatui::widgets::{Block, BorderType, Borders, Cell, List, ListItem, Paragraph, Row, Table, TableState};
 use ratatui::Frame;
 
 use crate::app::{App, Mode};
@@ -19,6 +19,32 @@ pub fn status_color(s: Status) -> Color {
         Status::Exception => Color::Red,
         Status::Unknown => Color::DarkGray,
     }
+}
+
+/// Green when fresher than a day, yellow under three days, red beyond that.
+pub fn age_color(age: chrono::Duration) -> Color {
+    if age < chrono::Duration::hours(24) {
+        Color::Green
+    } else if age < chrono::Duration::hours(72) {
+        Color::Yellow
+    } else {
+        Color::Red
+    }
+}
+
+/// Render a `width`-cell bar, `▰` for the elapsed fraction and `▱` for the rest.
+pub fn progress_bar(frac: f64, width: usize) -> String {
+    let frac = if frac.is_nan() { 0.0 } else { frac.clamp(0.0, 1.0) };
+    let filled = ((frac * width as f64).floor() as usize).min(width);
+    format!("{}{}", "▰".repeat(filled), "▱".repeat(width - filled))
+}
+
+/// A colored " label " pill for a status, black text on the status color.
+pub fn status_pill(status: Status) -> Span<'static> {
+    Span::styled(
+        format!(" {} ", status.label()),
+        Style::default().fg(Color::Black).bg(status_color(status)).add_modifier(Modifier::BOLD),
+    )
 }
 
 /// Coarse human duration: "45s", "2m", "5h", "2d"; negative or zero -> "now".
@@ -49,6 +75,7 @@ pub fn draw(frame: &mut Frame, app: &App, now: DateTime<Utc>, spinner_tick: usiz
 }
 
 fn draw_header(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc>) {
+    let [left, right] = Layout::horizontal([Constraint::Min(0), Constraint::Length(8)]).areas(area);
     let next = app
         .parcels
         .parcels
@@ -67,7 +94,9 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc>) {
         spans.push(Span::raw(" · "));
         spans.push(Span::styled(err.clone(), Style::default().fg(Color::Red)));
     }
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    frame.render_widget(Paragraph::new(Line::from(spans)), left);
+    let clock = now.with_timezone(&chrono::Local).format("%H:%M:%S").to_string();
+    frame.render_widget(Paragraph::new(clock).right_aligned(), right);
 }
 
 fn draw_table(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc>, spinner_tick: usize) {
@@ -76,52 +105,74 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc>, spin
         frame.render_widget(hint, area);
         return;
     }
+    let block = Block::bordered().border_type(BorderType::Rounded).title(" parcels ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
     let header = Row::new(["LABEL", "NUMBER", "CARRIER", "STATUS", "LAST EVENT", "AGE", "NEXT"])
-        .style(Style::default().add_modifier(Modifier::BOLD).fg(Color::Cyan));
-    let rows = app.parcels.parcels.iter().map(|p| {
+        .style(Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD));
+    let zebra = Style::default().bg(Color::Indexed(235));
+    let rows = app.parcels.parcels.iter().enumerate().map(|(i, p)| {
         let state = app.state_for(&p.number);
         let tracking = state.and_then(|s| s.tracking.as_ref());
         let status = tracking.map(|t| t.status).unwrap_or(Status::Unknown);
         let latest = tracking.and_then(|t| t.events.first());
-        let next = if app.polling.as_deref() == Some(p.number.as_str()) {
-            format!("{} polling", SPINNER[spinner_tick % SPINNER.len()])
+
+        let next_cell = if app.polling.as_deref() == Some(p.number.as_str()) {
+            Cell::from(format!("{} polling", SPINNER[spinner_tick % SPINNER.len()])).style(Style::default().fg(Color::Yellow))
         } else if status == Status::Delivered {
-            "done".into()
+            Cell::from("done").style(Style::default().fg(Color::Green))
+        } else if let Some(s) = state {
+            let remaining = s.next_poll - now;
+            let frac = 1.0 - remaining.num_seconds() as f64 / app.interval.as_secs_f64();
+            Cell::from(format!("{} {}", progress_bar(frac, 5), humanize(remaining)))
         } else {
-            state.map(|s| humanize(s.next_poll - now)).unwrap_or_else(|| "now".into())
+            Cell::from("now")
         };
-        let status_text = if tracking.is_none() && state.and_then(|s| s.last_error.as_ref()).is_some() {
-            "error".to_string()
-        } else if tracking.is_none() {
-            "…".to_string()
+
+        let status_cell = if tracking.is_some() {
+            Cell::from(Line::from(status_pill(status)))
+        } else if state.and_then(|s| s.last_error.as_ref()).is_some() {
+            Cell::from("error").style(Style::default().fg(Color::Red))
         } else {
-            status.label().to_string()
+            Cell::from("…").style(Style::default().fg(Color::DarkGray))
         };
-        Row::new(vec![
-            Cell::from(p.label.clone().unwrap_or_default()),
-            Cell::from(p.number.clone()),
-            Cell::from(tracking.and_then(|t| t.carrier.clone()).unwrap_or_default()),
-            Cell::from(status_text).style(Style::default().fg(status_color(status)).add_modifier(Modifier::BOLD)),
-            Cell::from(latest.map(|e| e.description.clone()).unwrap_or_default()),
-            Cell::from(latest.and_then(|e| e.time).map(|t| humanize(now - t)).unwrap_or_default()),
-            Cell::from(next),
-        ])
+
+        let age = latest.and_then(|e| e.time).map(|t| now - t);
+        let age_cell = match age {
+            Some(d) => Cell::from(humanize(d)).style(Style::default().fg(age_color(d))),
+            None => Cell::from(""),
+        };
+
+        let mut row = Row::new(vec![
+            Cell::from(p.label.clone().unwrap_or_default()).style(Style::default().fg(Color::Cyan)),
+            Cell::from(p.number.clone()).style(Style::default().add_modifier(Modifier::BOLD)),
+            Cell::from(tracking.and_then(|t| t.carrier.clone()).unwrap_or_default()).style(Style::default().fg(Color::Magenta)),
+            status_cell,
+            Cell::from(latest.map(|e| e.display_text().to_string()).unwrap_or_default()),
+            age_cell,
+            next_cell,
+        ]);
+        if i % 2 == 1 && i != app.selected {
+            row = row.style(zebra);
+        }
+        row
     });
     let widths = [
         Constraint::Length(14),
         Constraint::Length(22),
         Constraint::Length(18),
-        Constraint::Length(16),
+        Constraint::Length(18),
         Constraint::Min(20),
         Constraint::Length(5),
-        Constraint::Length(10),
+        Constraint::Length(14),
     ];
     let table = Table::new(rows, widths)
         .header(header)
         .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED))
         .column_spacing(1);
     let mut state = TableState::default().with_selected(Some(app.selected));
-    frame.render_stateful_widget(table, area, &mut state);
+    frame.render_stateful_widget(table, inner, &mut state);
 }
 
 fn draw_detail(frame: &mut Frame, area: Rect, app: &App, scroll: u16) {
@@ -155,7 +206,7 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App, scroll: u16) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
-        .title_bottom(Line::from(Span::styled(format!(" {} ", status.label()), Style::default().fg(status_color(status)))));
+        .title_bottom(Line::from(status_pill(status)));
     frame.render_widget(List::new(items).block(block), area);
 }
 
@@ -245,6 +296,7 @@ mod tests {
         assert!(out.contains("1Z999AA10123456784"), "{out}");
         assert!(out.contains("2 parcels"), "{out}");
         assert!(out.contains("a add"), "{out}");
+        assert!(out.contains("parcels"), "block title: {out}");
     }
 
     #[test]
@@ -334,6 +386,35 @@ mod tests {
         assert_eq!(humanize(chrono::Duration::hours(5) + chrono::Duration::minutes(3)), "5h");
         assert_eq!(humanize(chrono::Duration::days(2)), "2d");
         assert_eq!(humanize(chrono::Duration::seconds(-5)), "now");
+    }
+
+    #[test]
+    fn progress_bar_fills_with_fraction() {
+        assert_eq!(progress_bar(0.0, 5), "▱▱▱▱▱");
+        assert_eq!(progress_bar(0.5, 4), "▰▰▱▱");
+        assert_eq!(progress_bar(1.0, 3), "▰▰▰");
+        assert_eq!(progress_bar(7.0, 2), "▰▰", "clamped");
+        assert_eq!(progress_bar(-1.0, 2), "▱▱", "clamped");
+    }
+
+    #[test]
+    fn age_colors_by_staleness() {
+        assert_eq!(age_color(chrono::Duration::hours(3)), Color::Green);
+        assert_eq!(age_color(chrono::Duration::hours(30)), Color::Yellow);
+        assert_eq!(age_color(chrono::Duration::days(4)), Color::Red);
+    }
+
+    #[test]
+    fn table_shows_progress_bar_and_translated_text() {
+        let mut app = sample_app();
+        // 7 minutes remaining of a 10-minute interval → 30% elapsed → 1 of 5 blocks
+        let st = app.cache.by_number.get_mut("RB123456789CN").unwrap();
+        st.tracking.as_mut().unwrap().events[0].translated = Some("Left the facility".into());
+        let out = render(&app, 120, 12);
+        assert!(out.contains("▰▱▱▱▱ 7m"), "{out}");
+        assert!(out.contains("Left the facility"), "{out}");
+        assert!(!out.contains("Departed facility"), "table shows translation only: {out}");
+        assert!(out.contains("parcels"), "block title: {out}");
     }
 
     #[test]

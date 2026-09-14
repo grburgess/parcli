@@ -23,8 +23,6 @@ pub struct TrackEvent {
 }
 
 impl TrackEvent {
-    // Consumed by the UI rendering added in a later polish task.
-    #[allow(dead_code)]
     pub fn display_text(&self) -> &str {
         self.translated.as_deref().unwrap_or(&self.description)
     }
