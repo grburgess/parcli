@@ -23,17 +23,17 @@ use crate::store::{ParcelList, Paths, StateCache};
 #[command(version, about)]
 struct Args {
     /// Minutes between polls of each parcel
-    #[arg(long, default_value_t = 10)]
+    #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u64).range(1..=1440))]
     interval: u64,
     /// Seconds to wait for parcelsapp before giving up on one poll
-    #[arg(long, default_value_t = 90)]
+    #[arg(long, default_value_t = 90, value_parser = clap::value_parser!(u64).range(5..=600))]
     timeout: u64,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let interval = Duration::from_secs(args.interval.max(1) * 60);
+    let interval = Duration::from_secs(args.interval * 60);
 
     let paths = Paths::discover()?;
     let parcels = ParcelList::load(&paths.parcels)?;
