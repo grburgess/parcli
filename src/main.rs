@@ -1,5 +1,6 @@
 mod app;
 mod geo;
+mod journey;
 mod poller;
 mod provider;
 mod store;

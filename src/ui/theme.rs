@@ -7,8 +7,7 @@ use ratatui::text::Span;
 pub const ACCENT: Color = Color::Cyan;
 /// Fallback carrier color, used only when a carrier name is empty.
 pub const CARRIER: Color = Color::Magenta;
-/// Warning accent (amber). Not yet applied anywhere; reserved for a future warning state.
-#[allow(dead_code)]
+/// Warning accent (amber). Used for the journey strip's moving pulse.
 pub const WARN: Color = Color::Indexed(214);
 /// Muted text for secondary or inactive content.
 pub const DIM: Color = Color::DarkGray;
