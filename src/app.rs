@@ -1,11 +1,11 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
 
-use crate::poller::{PollCommand, PollResult};
+use crate::poller::{PollCommand, PollEvent, PollResult};
 use crate::store::{Parcel, ParcelList, ParcelState, StateCache};
 
 #[derive(Debug)]
@@ -68,6 +68,9 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent, now: DateTime<Utc>) -> Vec<Effect> {
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return vec![Effect::Quit];
+        }
         match &mut self.mode {
             Mode::Normal => self.handle_normal(key, now),
             Mode::Adding(input) => match key.code {
@@ -87,7 +90,6 @@ impl App {
                     }
                     self.parcels.add(&number, label.as_deref(), now);
                     self.selected = self.parcels.parcels.len() - 1;
-                    self.polling = Some(number.clone());
                     vec![Effect::SaveParcels, Effect::Send(PollCommand::Add(number))]
                 }
                 _ => {
@@ -158,12 +160,7 @@ impl App {
                 vec![]
             }
             KeyCode::Char('r') => self.refresh_selected(),
-            KeyCode::Char('R') => {
-                if let Some(first) = self.parcels.parcels.first() {
-                    self.polling = Some(first.number.clone());
-                }
-                vec![Effect::Send(PollCommand::RefreshAll)]
-            }
+            KeyCode::Char('R') => vec![Effect::Send(PollCommand::RefreshAll)],
             KeyCode::Enter => {
                 if self.selected_parcel().is_some() {
                     self.mode = Mode::Detail { scroll: 0 };
@@ -176,15 +173,24 @@ impl App {
 
     fn refresh_selected(&mut self) -> Vec<Effect> {
         match self.selected_parcel().map(|p| p.number.clone()) {
-            Some(number) => {
-                self.polling = Some(number.clone());
-                vec![Effect::Send(PollCommand::Refresh(number))]
-            }
+            Some(number) => vec![Effect::Send(PollCommand::Refresh(number))],
             None => vec![],
         }
     }
 
-    pub fn apply_poll_result(&mut self, r: PollResult, now: DateTime<Utc>) -> Vec<Effect> {
+    /// `Started` is the single source of truth for the spinner: it fires for
+    /// every poll, scheduled or user-initiated. `Finished` applies the result.
+    pub fn apply_poll_event(&mut self, event: PollEvent, now: DateTime<Utc>) -> Vec<Effect> {
+        match event {
+            PollEvent::Started(number) => {
+                self.polling = Some(number);
+                vec![]
+            }
+            PollEvent::Finished(r) => self.apply_poll_result(r, now),
+        }
+    }
+
+    fn apply_poll_result(&mut self, r: PollResult, now: DateTime<Utc>) -> Vec<Effect> {
         if self.polling.as_deref() == Some(r.number.as_str()) {
             self.polling = None;
         }
@@ -253,6 +259,25 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_c_quits_in_every_mode() {
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        let mut app = app_with(&["A"]);
+        assert_eq!(app.handle_key(ctrl_c, now()), vec![Effect::Quit]);
+
+        app.handle_key(key('a'), now());
+        assert!(matches!(app.mode, Mode::Adding(_)));
+        assert_eq!(app.handle_key(ctrl_c, now()), vec![Effect::Quit]);
+
+        app.mode = Mode::Normal;
+        app.handle_key(key('d'), now());
+        assert!(matches!(app.mode, Mode::ConfirmRemove));
+        assert_eq!(app.handle_key(ctrl_c, now()), vec![Effect::Quit]);
+
+        app.mode = Mode::Detail { scroll: 0 };
+        assert_eq!(app.handle_key(ctrl_c, now()), vec![Effect::Quit]);
+    }
+
+    #[test]
     fn navigation_clamps() {
         let mut app = app_with(&["A", "B", "C"]);
         app.handle_key(key('k'), now());
@@ -277,6 +302,8 @@ mod tests {
         assert_eq!(app.parcels.parcels[0].number, "RB123456789CN");
         assert_eq!(app.parcels.parcels[0].label.as_deref(), Some("camera body"));
         assert_eq!(app.selected, 0);
+        assert!(app.polling.is_none());
+        app.apply_poll_event(PollEvent::Started("RB123456789CN".into()), now());
         assert_eq!(app.polling.as_deref(), Some("RB123456789CN"));
     }
 
@@ -380,7 +407,7 @@ mod tests {
             events: vec![TrackEvent { time: Some(now()), description: "Posted".into(), location: None }],
             fetched_at: now(),
         };
-        let effects = app.apply_poll_result(PollResult { number: "A".into(), result: Ok(tracking.clone()) }, now());
+        let effects = app.apply_poll_event(PollEvent::Finished(PollResult { number: "A".into(), result: Ok(tracking.clone()) }), now());
         assert_eq!(effects, vec![Effect::SaveState]);
         let st = app.state_for("A").unwrap();
         assert_eq!(st.tracking.as_ref(), Some(&tracking));
@@ -394,8 +421,8 @@ mod tests {
     fn poll_failure_keeps_old_tracking_and_records_error() {
         let mut app = app_with(&["A"]);
         let tracking = Tracking { number: "A".into(), carrier: None, status: Status::Pending, events: vec![], fetched_at: now() };
-        app.apply_poll_result(PollResult { number: "A".into(), result: Ok(tracking.clone()) }, now());
-        app.apply_poll_result(PollResult { number: "A".into(), result: Err("boom".into()) }, now());
+        app.apply_poll_event(PollEvent::Finished(PollResult { number: "A".into(), result: Ok(tracking.clone()) }), now());
+        app.apply_poll_event(PollEvent::Finished(PollResult { number: "A".into(), result: Err("boom".into()) }), now());
         let st = app.state_for("A").unwrap();
         assert_eq!(st.tracking.as_ref(), Some(&tracking));
         assert_eq!(st.failures, 1);
@@ -407,9 +434,21 @@ mod tests {
     #[test]
     fn poll_result_for_removed_parcel_is_ignored() {
         let mut app = app_with(&[]);
-        let effects = app.apply_poll_result(PollResult { number: "Z".into(), result: Err("x".into()) }, now());
+        let effects = app.apply_poll_event(PollEvent::Finished(PollResult { number: "Z".into(), result: Err("x".into()) }), now());
         assert!(effects.is_empty());
         assert!(app.state_for("Z").is_none());
+    }
+
+    #[test]
+    fn started_event_sets_polling_and_finished_clears_it() {
+        let mut app = app_with(&["A"]);
+        assert!(app.polling.is_none());
+        let effects = app.apply_poll_event(PollEvent::Started("A".into()), now());
+        assert!(effects.is_empty());
+        assert_eq!(app.polling.as_deref(), Some("A"));
+        let tracking = Tracking { number: "A".into(), carrier: None, status: Status::Pending, events: vec![], fetched_at: now() };
+        app.apply_poll_event(PollEvent::Finished(PollResult { number: "A".into(), result: Ok(tracking) }), now());
+        assert!(app.polling.is_none());
     }
 
     #[test]

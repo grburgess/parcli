@@ -22,6 +22,15 @@ pub struct PollResult {
     pub result: Result<Tracking, String>,
 }
 
+/// Sent from the poller worker to the UI: `Started` right before a poll begins
+/// (so the UI can show the spinner even for scheduled, non-user-initiated
+/// polls), then `Finished` once it completes.
+#[derive(Debug)]
+pub enum PollEvent {
+    Started(String),
+    Finished(PollResult),
+}
+
 #[derive(Debug, Clone)]
 struct Entry {
     next_poll: DateTime<Utc>,
@@ -107,7 +116,7 @@ pub async fn run_poller(
     provider: Arc<dyn Provider>,
     mut scheduler: Scheduler,
     mut commands: mpsc::Receiver<PollCommand>,
-    results: mpsc::Sender<PollResult>,
+    results: mpsc::Sender<PollEvent>,
 ) {
     let mut tick = tokio::time::interval(Duration::from_millis(500));
     loop {
@@ -121,12 +130,15 @@ pub async fn run_poller(
             },
             _ = tick.tick() => {
                 let Some(number) = scheduler.next_due(Utc::now()) else { continue };
+                if results.send(PollEvent::Started(number.clone())).await.is_err() {
+                    return;
+                }
                 let result = provider.track(&number).await.map_err(|e| e.to_string());
                 match &result {
                     Ok(t) => scheduler.record_success(&number, t.status, Utc::now()),
                     Err(_) => scheduler.record_failure(&number, Utc::now()),
                 }
-                if results.send(PollResult { number, result }).await.is_err() {
+                if results.send(PollEvent::Finished(PollResult { number, result })).await.is_err() {
                     return;
                 }
             }
@@ -225,6 +237,20 @@ mod tests {
         }
     }
 
+    fn expect_started(ev: PollEvent, number: &str) {
+        match ev {
+            PollEvent::Started(n) => assert_eq!(n, number),
+            PollEvent::Finished(r) => panic!("expected Started({number}), got Finished({r:?})"),
+        }
+    }
+
+    fn expect_finished(ev: PollEvent) -> PollResult {
+        match ev {
+            PollEvent::Finished(r) => r,
+            PollEvent::Started(n) => panic!("expected Finished, got Started({n})"),
+        }
+    }
+
     #[tokio::test]
     async fn worker_polls_due_parcels_and_reports_results() {
         let provider = Arc::new(MockProvider { calls: Mutex::new(vec![]), fail: false });
@@ -233,12 +259,14 @@ mod tests {
         let (res_tx, mut res_rx) = mpsc::channel(8);
         let worker = tokio::spawn(run_poller(provider.clone(), scheduler, cmd_rx, res_tx));
 
-        let first = res_rx.recv().await.unwrap();
+        expect_started(res_rx.recv().await.unwrap(), "A");
+        let first = expect_finished(res_rx.recv().await.unwrap());
         assert_eq!(first.number, "A");
         assert!(first.result.is_ok());
 
         cmd_tx.send(PollCommand::Add("B".into())).await.unwrap();
-        let second = res_rx.recv().await.unwrap();
+        expect_started(res_rx.recv().await.unwrap(), "B");
+        let second = expect_finished(res_rx.recv().await.unwrap());
         assert_eq!(second.number, "B");
 
         cmd_tx.send(PollCommand::Shutdown).await.unwrap();
@@ -253,7 +281,8 @@ mod tests {
         let (cmd_tx, cmd_rx) = mpsc::channel(8);
         let (res_tx, mut res_rx) = mpsc::channel(8);
         let worker = tokio::spawn(run_poller(provider, scheduler, cmd_rx, res_tx));
-        let r = res_rx.recv().await.unwrap();
+        expect_started(res_rx.recv().await.unwrap(), "A");
+        let r = expect_finished(res_rx.recv().await.unwrap());
         assert_eq!(r.result.unwrap_err(), "boom");
         cmd_tx.send(PollCommand::Shutdown).await.unwrap();
         worker.await.unwrap();

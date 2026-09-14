@@ -5,9 +5,10 @@ use chrono::Utc;
 use crossterm::event::{Event, EventStream, KeyEventKind};
 use futures::StreamExt;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
 
 use crate::app::{App, Effect};
-use crate::poller::{PollCommand, PollResult};
+use crate::poller::{PollCommand, PollEvent};
 use crate::store::Paths;
 use crate::ui;
 
@@ -16,7 +17,7 @@ pub async fn run(
     mut app: App,
     paths: Paths,
     cmd_tx: mpsc::Sender<PollCommand>,
-    mut results: mpsc::Receiver<PollResult>,
+    mut results: mpsc::Receiver<PollEvent>,
 ) -> Result<App> {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -34,7 +35,7 @@ async fn event_loop(
     app: &mut App,
     paths: &Paths,
     cmd_tx: &mpsc::Sender<PollCommand>,
-    results: &mut mpsc::Receiver<PollResult>,
+    results: &mut mpsc::Receiver<PollEvent>,
 ) -> Result<()> {
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(250));
@@ -43,7 +44,7 @@ async fn event_loop(
         terminal.draw(|f| ui::draw(f, app, Utc::now(), spinner))?;
         let effects = tokio::select! {
             _ = tick.tick() => { spinner = spinner.wrapping_add(1); vec![] }
-            Some(r) = results.recv() => app.apply_poll_result(r, Utc::now()),
+            Some(e) = results.recv() => app.apply_poll_event(e, Utc::now()),
             Some(ev) = events.next() => match ev.context("reading terminal events")? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => app.handle_key(key, Utc::now()),
                 _ => vec![],
@@ -61,11 +62,15 @@ async fn event_loop(
                         app.last_error = Some(format!("saving state: {e:#}"));
                     }
                 }
-                Effect::Send(cmd) => {
-                    if cmd_tx.send(cmd).await.is_err() {
+                Effect::Send(cmd) => match cmd_tx.try_send(cmd) {
+                    Ok(()) => {}
+                    Err(TrySendError::Full(_)) => {
+                        app.last_error = Some("poller busy, try again".into());
+                    }
+                    Err(TrySendError::Closed(_)) => {
                         app.last_error = Some("poller stopped".into());
                     }
-                }
+                },
                 Effect::Quit => return Ok(()),
             }
         }

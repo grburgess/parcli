@@ -26,6 +26,7 @@ API key is needed.
 | `Enter` | show event history; `q`/`Esc` to go back |
 | `j`/`k`, arrows | move |
 | `q` | quit |
+| `Ctrl-C` | quit |
 
 Delivered parcels stop being polled. Failed polls back off exponentially up to
 an hour.
