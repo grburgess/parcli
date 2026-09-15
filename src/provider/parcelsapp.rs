@@ -120,17 +120,29 @@ pub struct ParcelsAppProvider {
     handler: JoinHandle<()>,
     timeout: Duration,
     user_agent: String,
+    profile_dir: std::path::PathBuf,
+}
+
+/// A per-process Chrome profile directory. chromiumoxide's default is a single
+/// shared `chromiumoxide-runner` dir, whose SingletonLock stops a second parcli
+/// instance from starting.
+fn profile_dir_for(pid: u32) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("parcli-chrome-{pid}"))
 }
 
 impl ParcelsAppProvider {
     /// Launch one headless browser. Honors `PARCLI_CHROME`; otherwise uses
     /// chromiumoxide's executable detection.
     pub async fn launch(timeout: Duration) -> Result<Self> {
+        let profile_dir = profile_dir_for(std::process::id());
+        std::fs::create_dir_all(&profile_dir)
+            .with_context(|| format!("creating {}", profile_dir.display()))?;
         let mut builder = BrowserConfig::builder()
             .request_timeout(timeout)
             .new_headless_mode()
             .hide()
-            .window_size(1280, 900);
+            .window_size(1280, 900)
+            .user_data_dir(&profile_dir);
         if let Ok(path) = std::env::var("PARCLI_CHROME") {
             builder = builder.chrome_executable(path);
         }
@@ -149,16 +161,18 @@ impl ParcelsAppProvider {
                 let _ = browser.close().await;
                 let _ = browser.wait().await;
                 handler.abort();
+                let _ = std::fs::remove_dir_all(&profile_dir);
                 return Err(e).context("querying browser user agent");
             }
         };
-        Ok(Self { browser, handler, timeout, user_agent })
+        Ok(Self { browser, handler, timeout, user_agent, profile_dir })
     }
 
     pub async fn close(mut self) {
         let _ = self.browser.close().await;
         let _ = self.browser.wait().await;
         self.handler.abort();
+        let _ = std::fs::remove_dir_all(&self.profile_dir);
     }
 
     async fn track_inner(&self, number: &str) -> Result<Tracking> {
@@ -252,6 +266,12 @@ mod tests {
 
     fn now() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 9, 13, 12, 0, 0).unwrap()
+    }
+
+    #[test]
+    fn profile_dir_is_per_process() {
+        assert_ne!(profile_dir_for(1), profile_dir_for(2));
+        assert!(profile_dir_for(42).ends_with("parcli-chrome-42"));
     }
 
     #[test]
