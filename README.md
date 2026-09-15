@@ -82,3 +82,7 @@ parcli talks to three services: parcelsapp.com (the tracking number, via a headl
     cargo test live_ -- --ignored --nocapture  # one real poll against parcelsapp (needs network, takes 10–60 s)
 
 Design: `docs/superpowers/specs/2026-09-13-parcli-design.md`.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

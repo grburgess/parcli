@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.80"
 description = "top-like terminal dashboard for international parcel tracking"
+license = "MIT"
 
 [dependencies]
 anyhow = "1"
