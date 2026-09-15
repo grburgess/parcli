@@ -61,6 +61,9 @@ struct ApiCarrier {
 pub fn parse_response(body: &str, number: &str, fetched_at: DateTime<Utc>) -> Result<Tracking> {
     let api: ApiResponse = serde_json::from_str(body).context("parcelsapp response is not JSON")?;
     if let Some(msg) = api.error.filter(|m| !m.is_empty()).or(api.message.filter(|m| !m.is_empty())) {
+        if msg == "NO_DATA" {
+            anyhow::bail!("{}", super::NOT_FOUND_MSG);
+        }
         anyhow::bail!("parcelsapp error: {msg}");
     }
 
@@ -331,6 +334,12 @@ mod tests {
     fn empty_error_falls_back_to_message() {
         let err = parse_response(r#"{"error":"","message":"Rate limited"}"#, "X", now()).unwrap_err();
         assert!(err.to_string().contains("Rate limited"), "{err}");
+    }
+
+    #[test]
+    fn no_data_maps_to_not_found() {
+        let err = parse_response(r#"{"error":"NO_DATA"}"#, "X", now()).unwrap_err();
+        assert_eq!(err.to_string(), crate::provider::NOT_FOUND_MSG);
     }
 
     #[test]

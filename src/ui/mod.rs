@@ -159,6 +159,8 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc>, spin
 
         let status_cell = if tracking.is_some() {
             Cell::from(Line::from(status_pill(status)))
+        } else if state.and_then(|s| s.last_error.as_deref()) == Some(crate::provider::NOT_FOUND_MSG) {
+            Cell::from("not found").style(Style::default().fg(theme::WARN))
         } else if state.and_then(|s| s.last_error.as_ref()).is_some() {
             Cell::from("error").style(Style::default().fg(Color::Red))
         } else {
@@ -510,6 +512,17 @@ mod tests {
         );
         let out = render(&app, 100, 16);
         assert!(out.contains("timed out"), "{out}");
+    }
+
+    #[test]
+    fn not_found_parcel_shows_not_found_status() {
+        let mut app = sample_app();
+        app.cache.by_number.insert(
+            "1Z999AA10123456784".into(),
+            crate::store::ParcelState { tracking: None, last_error: Some(crate::provider::NOT_FOUND_MSG.into()), failures: 1, next_poll: now() },
+        );
+        let out = render(&app, 120, 12);
+        assert!(out.contains("not found"), "{out}");
     }
 
     #[test]

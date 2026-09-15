@@ -227,7 +227,11 @@ impl App {
             Err(msg) => {
                 state.failures = state.failures.saturating_add(1);
                 let factor = 2i32.saturating_pow(state.failures.min(16));
-                state.next_poll = now + (interval * factor).min(MAX_BACKOFF);
+                state.next_poll = if msg == crate::provider::NOT_FOUND_MSG {
+                    now + MAX_BACKOFF
+                } else {
+                    now + (interval * factor).min(MAX_BACKOFF)
+                };
                 state.last_error = Some(msg.clone());
                 self.last_error = Some(format!("{}: {msg}", r.number));
             }
@@ -444,6 +448,18 @@ mod tests {
         assert_eq!(st.last_error.as_deref(), Some("boom"));
         assert_eq!(st.next_poll, now() + chrono::Duration::minutes(20));
         assert_eq!(app.last_error.as_deref(), Some("A: boom"));
+    }
+
+    #[test]
+    fn not_found_backs_off_to_the_cap_immediately() {
+        let mut app = app_with(&["A"]);
+        app.apply_poll_event(
+            PollEvent::Finished(PollResult { number: "A".into(), result: Err(crate::provider::NOT_FOUND_MSG.into()) }),
+            now(),
+        );
+        let st = app.state_for("A").unwrap();
+        assert_eq!(st.next_poll, now() + chrono::Duration::hours(1));
+        assert_eq!(st.last_error.as_deref(), Some("not found"));
     }
 
     #[test]

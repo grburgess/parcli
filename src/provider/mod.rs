@@ -91,6 +91,10 @@ pub fn classify_status(api_status: &str, latest_event: Option<&str>) -> Status {
     }
 }
 
+/// Error text a provider returns when the site has no record of the number at
+/// all (as opposed to a transient failure). Poller and UI treat it specially.
+pub const NOT_FOUND_MSG: &str = "not found";
+
 pub mod parcelsapp;
 
 #[cfg(test)]

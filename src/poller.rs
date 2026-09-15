@@ -166,6 +166,15 @@ impl Scheduler {
         }
     }
 
+    /// The site has no record of this number: retry at the backoff cap rather
+    /// than climbing through the whole backoff ladder.
+    pub fn record_not_found(&mut self, number: &str, now: DateTime<Utc>) {
+        if let Some(e) = self.entries.get_mut(number) {
+            e.failures = e.failures.saturating_add(1);
+            e.next_poll = now + chrono::Duration::from_std(MAX_BACKOFF).unwrap_or_else(|_| chrono::Duration::zero());
+        }
+    }
+
     pub fn record_failure(&mut self, number: &str, now: DateTime<Utc>) {
         if let Some(e) = self.entries.get_mut(number) {
             e.failures = e.failures.saturating_add(1);
@@ -245,6 +254,7 @@ pub async fn run_poller(
                 };
                 match &result {
                     Ok(t) => scheduler.record_success(&number, t.status, Utc::now()),
+                    Err(msg) if msg == crate::provider::NOT_FOUND_MSG => scheduler.record_not_found(&number, Utc::now()),
                     Err(_) => scheduler.record_failure(&number, Utc::now()),
                 }
                 // Events to geocode are cloned out before `result` moves into
@@ -321,6 +331,13 @@ mod tests {
         assert_eq!(s.next_poll("A"), Some(t0() + mins(60)));
         s.record_success("A", Status::InTransit, t0());
         assert_eq!(s.next_poll("A"), Some(t0() + mins(10)), "success resets backoff");
+    }
+
+    #[test]
+    fn not_found_goes_straight_to_the_backoff_cap() {
+        let mut s = Scheduler::new(Duration::from_secs(600), vec!["A".into()], t0());
+        s.record_not_found("A", t0());
+        assert_eq!(s.next_poll("A"), Some(t0() + mins(60)));
     }
 
     #[test]
