@@ -90,7 +90,7 @@ pub async fn geocode_locations(geocoder: &dyn Geocoder, geo: &mut GeoCache, even
         if key.is_empty() || geo.contains_key(&key) {
             continue;
         }
-        match geocoder.geocode(&display, true).await {
+        match geocode_place(geocoder, &display).await {
             Ok(coord) => {
                 geo.insert(key.clone(), coord);
                 if out.send(PollEvent::Geocoded { key, coord }).await.is_err() {
@@ -100,6 +100,16 @@ pub async fn geocode_locations(geocoder: &dyn Geocoder, geo: &mut GeoCache, even
             Err(_) => break,
         }
     }
+}
+
+/// Try the full location string, then its place-name parts, until one geocodes.
+async fn geocode_place(geocoder: &dyn Geocoder, display: &str) -> anyhow::Result<Option<Coord>> {
+    for candidate in crate::geo::place_candidates(display) {
+        if let Some(coord) = geocoder.geocode(&candidate, true).await? {
+            return Ok(Some(coord));
+        }
+    }
+    Ok(None)
 }
 
 #[derive(Debug, Clone)]
@@ -536,6 +546,29 @@ mod tests {
 
     fn loc(location: &str) -> TrackEvent {
         TrackEvent { time: None, description: "x".into(), location: Some(location.into()), translated: None }
+    }
+
+    #[tokio::test]
+    async fn geocode_locations_falls_back_to_place_parts() {
+        let mut responses = HashMap::new();
+        responses.insert("SECLIN".to_string(), Ok(Some((50.5, 3.0))));
+        let geocoder = FakeGeocoder { calls: Mutex::new(vec![]), responses };
+        let mut geo: GeoCache = HashMap::new();
+        let events = vec![loc("SECLIN - CHRONOPOST"), loc("Web Services")];
+        let (tx, mut rx) = mpsc::channel(8);
+
+        geocode_locations(&geocoder, &mut geo, &events, &tx).await;
+        drop(tx);
+
+        let calls: Vec<String> = geocoder.calls.lock().unwrap().iter().map(|(q, _)| q.clone()).collect();
+        assert_eq!(calls, vec!["SECLIN - CHRONOPOST", "SECLIN", "Web Services"], "full string first, then parts; stops at the first hit");
+        assert_eq!(geo.get("seclin - chronopost"), Some(&Some((50.5, 3.0))), "cached under the ORIGINAL key");
+        assert_eq!(geo.get("web services"), Some(&None));
+        let mut n = 0;
+        while rx.recv().await.is_some() {
+            n += 1;
+        }
+        assert_eq!(n, 2);
     }
 
     #[tokio::test]

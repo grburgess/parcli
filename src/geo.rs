@@ -94,6 +94,28 @@ pub fn normalize_place(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Strings to try, in order, when geocoding a carrier scan location. Carriers
+/// append depot/agency names ("SECLIN - CHRONOPOST", "LILLE - FR - ATOUT POINT
+/// SERVICES"), so after the full string we try each separator-delimited part
+/// that looks like a place name (≥ 3 letters, not a bare country code).
+pub fn place_candidates(place: &str) -> Vec<String> {
+    let full = normalize_place(place);
+    let mut out = Vec::new();
+    if full.is_empty() {
+        return out;
+    }
+    out.push(full.clone());
+    for part in full.split([',', '/', '(', ')', ':']).flat_map(|p| p.split(" - ")) {
+        let part = normalize_place(part);
+        let letters = part.chars().filter(|c| c.is_alphabetic()).count();
+        if letters < 3 || part == full || out.contains(&part) {
+            continue;
+        }
+        out.push(part);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

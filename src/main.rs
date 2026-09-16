@@ -74,6 +74,10 @@ async fn main() -> Result<()> {
 
     let translator: Option<Arc<dyn Translator>> = if args.no_translate { None } else { Some(Arc::new(MyMemoryTranslator::new()?)) };
     let translations = seed_translation_cache(&cache);
+    // Geocoding misses are cached only for the lifetime of a run: a location
+    // that Nominatim could not resolve gets one fresh attempt per start.
+    let mut geo = cache.geo.clone();
+    geo.retain(|_, v| v.is_some());
     let geocoder: Arc<dyn Geocoder> = Arc::new(NominatimGeocoder::new()?);
 
     let (cmd_tx, cmd_rx) = mpsc::channel::<PollCommand>(32);
@@ -83,7 +87,7 @@ async fn main() -> Result<()> {
         translator,
         translations,
         Some(geocoder),
-        cache.geo.clone(),
+        geo,
         parcels.home.clone(),
         scheduler,
         cmd_rx,
